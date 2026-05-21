@@ -1,0 +1,411 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  NLM-CKN AWS Batch compute environment for the release pipeline.
+  Runs release.py end-to-end (tarball extract + fetch + full ETL) on EC2
+  with Docker socket access so ArangoDB can be started as a sibling container.
+
+# ── Notes ──────────────────────────────────────────────────────────────────────
+#
+# EC2 launch type is required — Fargate cannot mount /var/run/docker.sock, which
+# release.py needs to start the ArangoDB sibling container via the Docker SDK.
+#
+# NCBI credentials are shared with the fetch stack: NCBI_EMAIL is read from the
+# SSM parameter /nlm-ckn/ncbi-email and NCBI_API_KEY from Secrets Manager at
+# NcbiApiKeySecretArn (both created by cloudformation/fetch.yaml).
+#
+# Prerequisites:
+#   - cloudformation/fetch.yaml deployed (provides NCBI SSM + Secrets Manager)
+#   - cloudformation/ecr.yaml deployed (provides pipeline image repository)
+#   - Pipeline image pushed to ECR
+#   - Private subnets with NAT gateway (job needs GitHub, NCBI, CELLxGENE, S3)
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file cloudformation/batch.yaml \
+#     --stack-name nlm-ckn-etl-batch \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#         S3Bucket=<bucket> \
+#         EcrImageUri=<account>.dkr.ecr.<region>.amazonaws.com/nlm-ckn-etl-pipeline:latest \
+#         NcbiApiKeySecretArn=<arn> \
+#         VpcId=vpc-<id> \
+#         SubnetIds=subnet-<a>,subnet-<b>
+
+Parameters:
+
+  S3Bucket:
+    Type: String
+    Description: S3 bucket for external cache, baseline dumps, and run artifacts.
+
+  EcrImageUri:
+    Type: String
+    Description: >
+      Full ECR URI for the pipeline image (includes JRE), e.g.
+      123456789012.dkr.ecr.us-east-1.amazonaws.com/nlm-ckn-etl-pipeline:latest
+
+  NcbiApiKeySecretArn:
+    Type: String
+    Description: >
+      Secrets Manager ARN for the NCBI API key. Created by fetch.yaml and
+      visible in the nlm-ckn-etl-fetch stack outputs (NcbiApiKeySecretArn).
+
+  NcbiEmailParameterName:
+    Type: String
+    Default: /nlm-ckn/ncbi-email
+    Description: SSM parameter name for the NCBI email (created by fetch.yaml).
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC containing the subnets below.
+
+  SubnetIds:
+    Type: CommaDelimitedList
+    Description: >
+      Comma-separated private subnet IDs (must have a NAT gateway for outbound
+      access to GitHub Releases, NCBI APIs, CELLxGENE, ECR, S3, Secrets Manager).
+
+  InstanceTypes:
+    Type: CommaDelimitedList
+    Default: 'r5.4xlarge,r5.2xlarge'
+    Description: >
+      EC2 instance types for the compute environment. The release pipeline
+      needs ~64 GB RAM minimum (32 GB Java heap + ArangoDB + Python overhead).
+      r5.4xlarge (128 GB) gives comfortable headroom; r5.2xlarge (64 GB) is
+      the minimum viable size.
+
+  MaxvCpus:
+    Type: Number
+    Default: 16
+    Description: >
+      Maximum vCPUs across the compute environment. One release job uses up to
+      8 vCPUs (one r5.2xlarge = 8 vCPUs); set higher to allow concurrent runs.
+
+  EbsVolumeGiB:
+    Type: Number
+    Default: 200
+    Description: >
+      EBS root volume size (GiB) for compute instances. Needs to hold the
+      ArangoDB data directory, baseline/golden dumps, OBO files, and tuple output.
+
+  GithubTokenSecretArn:
+    Type: String
+    Default: ''
+    Description: >
+      Optional. Secrets Manager ARN for a GitHub token used to post deployment
+      status updates. When provided, GITHUB_TOKEN is injected into the job
+      container via Secrets Manager rather than as a plain environment variable.
+      Create with deploy-batch.sh by setting GITHUB_TOKEN in the environment.
+
+Conditions:
+
+  HasGithubToken: !Not [!Equals [!Ref GithubTokenSecretArn, '']]
+
+Resources:
+
+  # ── Logging ───────────────────────────────────────────────────────────────────
+
+  ReleaseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /batch/nlm-ckn-release
+      RetentionInDays: 30
+
+  # ── Networking ────────────────────────────────────────────────────────────────
+
+  ReleaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Outbound-only security group for NLM-CKN Batch - no inbound rules needed
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: '0.0.0.0/0'
+          Description: Allow HTTPS outbound (GitHub, NCBI, CELLxGENE, ECR, S3, Secrets Manager)
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: '0.0.0.0/0'
+          Description: Allow DNS outbound (UDP)
+        - IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: '0.0.0.0/0'
+          Description: Allow DNS outbound (TCP fallback)
+      Tags:
+        - Key: Name
+          Value: nlm-ckn-release
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── IAM: Batch service role ───────────────────────────────────────────────────
+  # Used by AWS Batch itself to manage EC2 instances and ECS resources.
+
+  BatchServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nlm-ckn-release-batch-service-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: batch.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
+      Tags:
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── IAM: EC2 instance role ────────────────────────────────────────────────────
+  # Assumed by the EC2 instances in the compute environment so the ECS container
+  # agent can pull images from ECR and report status to ECS.
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nlm-ckn-release-instance-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      Tags:
+        - Key: Project
+          Value: nlm-ckn
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # ── IAM: Job execution role ───────────────────────────────────────────────────
+  # Used by ECS to pull the pipeline image from ECR and inject secrets.
+
+  JobExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nlm-ckn-release-job-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadNcbiCredentials
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadSsmParameters
+                Effect: Allow
+                Action: ssm:GetParameters
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/nlm-ckn/*'
+              - Sid: ReadApiKeySecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref NcbiApiKeySecretArn
+              - !If
+                - HasGithubToken
+                - Sid: ReadGithubTokenSecret
+                  Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref GithubTokenSecretArn
+                - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── IAM: Job role ─────────────────────────────────────────────────────────────
+  # Runtime permissions for application code inside the release container.
+
+  JobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nlm-ckn-release-job-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3ReleaseAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${S3Bucket}'
+              - Sid: ReadWriteObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:CopyObject
+                  - s3:DeleteObject
+                Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
+        - PolicyName: ReadNcbiCredentials
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadSsmParameters
+                Effect: Allow
+                Action: ssm:GetParameters
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/nlm-ckn/*'
+              - Sid: ReadApiKeySecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref NcbiApiKeySecretArn
+      Tags:
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── Launch template: expand EBS root volume ───────────────────────────────────
+  # The default Amazon ECS-optimized AMI ships with a 30 GiB root volume, which
+  # is too small for ArangoDB dumps, OBO files, and tuple output combined.
+
+  InstanceLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: nlm-ckn-release-lt
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref EbsVolumeGiB
+              VolumeType: gp3
+              DeleteOnTermination: true
+
+  # ── Batch: Compute Environment ────────────────────────────────────────────────
+
+  ComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      ComputeEnvironmentName: nlm-ckn-release
+      Type: MANAGED
+      State: ENABLED
+      ServiceRole: !GetAtt BatchServiceRole.Arn
+      ComputeResources:
+        Type: EC2
+        AllocationStrategy: BEST_FIT_PROGRESSIVE
+        MinvCpus: 0
+        MaxvCpus: !Ref MaxvCpus
+        DesiredvCpus: 0
+        InstanceTypes: !Ref InstanceTypes
+        InstanceRole: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref ReleaseSecurityGroup
+        Subnets: !Ref SubnetIds
+        LaunchTemplate:
+          LaunchTemplateId: !Ref InstanceLaunchTemplate
+        Tags:
+          Project: nlm-ckn
+      Tags:
+        Project: nlm-ckn
+
+  # ── Batch: Job Queue ──────────────────────────────────────────────────────────
+
+  JobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      JobQueueName: nlm-ckn-release
+      State: ENABLED
+      Priority: 10
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref ComputeEnvironment
+      Tags:
+        Project: nlm-ckn
+
+  # ── Batch: Job Definition ─────────────────────────────────────────────────────
+  #
+  # CELL_KN_TAG (required) and optional TAR_SOURCE / SKIP_ONTOLOGY / RUN_NAME are
+  # passed as container environment overrides at submit time by trigger-release.sh.
+  #
+  # The Docker socket is mounted so release.py can start ArangoDB as a sibling
+  # container on the same EC2 instance via the Docker SDK.
+
+  JobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      JobDefinitionName: nlm-ckn-release
+      Type: container
+      PlatformCapabilities:
+        - EC2
+      RetryStrategy:
+        Attempts: 1
+      Timeout:
+        AttemptDurationSeconds: 86400  # 24 h ceiling — full release takes ~8–12 h
+      ContainerProperties:
+        Image: !Ref EcrImageUri
+        JobRoleArn: !GetAtt JobRole.Arn
+        ExecutionRoleArn: !GetAtt JobExecutionRole.Arn
+        ResourceRequirements:
+          - Type: VCPU
+            Value: '8'
+          - Type: MEMORY
+            Value: '61440'  # 60 GiB — leaves headroom on r5.2xlarge (64 GiB total)
+        Environment:
+          - Name: S3_BUCKET
+            Value: !Ref S3Bucket
+        Secrets:
+          - Name: NCBI_EMAIL
+            ValueFrom: !Sub >-
+              arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${NcbiEmailParameterName}
+          - Name: NCBI_API_KEY
+            ValueFrom: !Ref NcbiApiKeySecretArn
+          - !If
+            - HasGithubToken
+            - Name: GITHUB_TOKEN
+              ValueFrom: !Ref GithubTokenSecretArn
+            - !Ref AWS::NoValue
+        Volumes:
+          - Name: docker-socket
+            Host:
+              SourcePath: /var/run/docker.sock
+        MountPoints:
+          - ContainerPath: /var/run/docker.sock
+            SourceVolume: docker-socket
+            ReadOnly: false
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref ReleaseLogGroup
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: release
+      Tags:
+        Project: nlm-ckn
+
+Outputs:
+
+  JobQueueName:
+    Value: !Ref JobQueue
+    Description: Batch job queue name (nlm-ckn-release).
+
+  JobDefinitionArn:
+    Value: !Ref JobDefinition
+    Description: Batch job definition ARN.
+
+  LogGroupName:
+    Value: !Ref ReleaseLogGroup
+    Description: CloudWatch log group for release job output (/batch/nlm-ckn-release).
+
+  ComputeEnvironmentArn:
+    Value: !Ref ComputeEnvironment
+    Description: Batch compute environment ARN.

@@ -1,0 +1,377 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  NLM-CKN scheduled external API fetch — daily ECS Fargate task triggered by
+  EventBridge Scheduler. Writes validated output to an S3 staging prefix first,
+  then promotes atomically to the live external/ prefix so concurrent pipeline
+  runs always see a complete, consistent snapshot.
+
+# ── Notes ──────────────────────────────────────────────────────────────────────
+#
+# NCBI_EMAIL is stored as a plain SSM String parameter (CloudFormation cannot
+# create SSM SecureString parameters). NCBI_API_KEY is stored in Secrets Manager,
+# which supports secret values natively and integrates with ECS task secrets.
+#
+# Prerequisites:
+#   - ECR repository with the nlm-ckn-etl image already pushed
+#   - Private subnets with a NAT gateway (task needs outbound internet for APIs)
+#   - S3 bucket already created (referenced by name, not created here)
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file cloudformation/fetch.yaml \
+#     --stack-name nlm-ckn-etl-fetch \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#         S3Bucket=<bucket> \
+#         EcrImageUri=<account>.dkr.ecr.<region>.amazonaws.com/nlm-ckn-etl:latest \
+#         NcbiEmail=user@example.com \
+#         NcbiApiKey=<key> \
+#         VpcId=vpc-<id> \
+#         SubnetIds=subnet-<a>,subnet-<b>
+
+Parameters:
+
+  S3Bucket:
+    Type: String
+    Description: S3 bucket for external cache, staging, and run artifacts.
+
+  EcrImageUri:
+    Type: String
+    Description: >
+      Full ECR image URI, e.g.
+      123456789012.dkr.ecr.us-east-1.amazonaws.com/nlm-ckn-etl:latest
+
+  NcbiEmail:
+    Type: String
+    Description: >
+      NCBI E-Utilities email address. Stored as a plain SSM String parameter
+      (CloudFormation cannot create SSM SecureString parameters directly).
+
+  NcbiApiKey:
+    Type: String
+    NoEcho: true
+    Description: NCBI E-Utilities API key. Stored in AWS Secrets Manager.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC containing the subnets below.
+
+  SubnetIds:
+    Type: CommaDelimitedList
+    Description: >
+      Comma-separated private subnet IDs for the Fargate task (e.g.
+      subnet-aaa,subnet-bbb). Subnets must have a NAT gateway for outbound
+      internet access to external APIs.
+
+  CknRun:
+    Type: String
+    Default: 'latest'
+    Description: >
+      Run identifier passed to fetch.py as CKN_RUN (e.g. "latest" or a versioned
+      run name). Controls which S3 prefix the fetcher writes external cache files to.
+
+  ScheduleExpression:
+    Type: String
+    Default: 'cron(0 2 * * ? *)'
+    Description: >
+      EventBridge Scheduler cron expression (UTC). Default: 02:00 UTC daily.
+
+  TaskCpu:
+    Type: String
+    Default: '2048'
+    AllowedValues: ['1024', '2048', '4096']
+    Description: Fargate vCPU units (1024 = 1 vCPU).
+
+  TaskMemoryMiB:
+    Type: String
+    Default: '8192'
+    Description: >
+      Fargate memory in MiB. The fetch requires ~8 GB for CELLxGENE census
+      data. Must be a valid Fargate cpu/memory combination.
+
+Resources:
+
+  # ── Secrets & Parameters ─────────────────────────────────────────────────────
+
+  NcbiEmailParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /nlm-ckn/ncbi-email
+      Type: String
+      Value: !Ref NcbiEmail
+      Description: NCBI E-Utilities email for the NLM-CKN ETL fetch task.
+      Tags:
+        Project: nlm-ckn
+
+  NcbiApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: /nlm-ckn/ncbi-api-key
+      Description: NCBI E-Utilities API key for the NLM-CKN ETL fetch task.
+      SecretString: !Ref NcbiApiKey
+      Tags:
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── Logging ──────────────────────────────────────────────────────────────────
+
+  FetchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/nlm-ckn-fetch
+      RetentionInDays: 30
+
+  # ── Networking ───────────────────────────────────────────────────────────────
+
+  FetchSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Outbound-only group for the NLM-CKN fetch Fargate task. No inbound rules are needed - the task initiates all connections.
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: '0.0.0.0/0'
+          Description: Allow HTTPS outbound (external APIs, S3, ECR, Secrets Manager)
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: '0.0.0.0/0'
+          Description: Allow DNS outbound (UDP)
+        - IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: '0.0.0.0/0'
+          Description: Allow DNS outbound (TCP fallback)
+      Tags:
+        - Key: Name
+          Value: nlm-ckn-fetch
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── ECS Cluster ──────────────────────────────────────────────────────────────
+
+  FetchCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: nlm-ckn-fetch
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── IAM: Task Execution Role ──────────────────────────────────────────────────
+  # Used by ECS itself to pull the image from ECR, write logs to CloudWatch,
+  # and inject secrets into the container environment at startup.
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nlm-ckn-fetch-execution-role
+      Description: >
+        Allows ECS to pull the nlm-ckn-etl image from ECR, stream logs to
+        CloudWatch, and inject NCBI credentials from SSM and Secrets Manager.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadNcbiCredentials
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadSsmParameters
+                Effect: Allow
+                Action: ssm:GetParameters
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/nlm-ckn/*'
+              - Sid: ReadApiKeySecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref NcbiApiKeySecret
+      Tags:
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── IAM: Task Role ────────────────────────────────────────────────────────────
+  # Runtime permissions used by application code inside the container.
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nlm-ckn-fetch-task-role
+      Description: >
+        Runtime S3 permissions for the fetch container: read the live external
+        cache to resume interrupted runs, write new data to staging, and
+        promote staging to live once the fetch is validated.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3FetchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${S3Bucket}'
+              - Sid: ReadLiveCache
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${S3Bucket}/external/*'
+              - Sid: WriteAndPromoteStaging
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3Bucket}/runs/*/external-staging/*'
+                  - !Sub 'arn:aws:s3:::${S3Bucket}/external/*'
+              - Sid: ReadAndWriteRuns
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${S3Bucket}/runs/*'
+      Tags:
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── IAM: Scheduler Role ───────────────────────────────────────────────────────
+  # Used by EventBridge Scheduler to call ECS RunTask on our behalf.
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nlm-ckn-fetch-scheduler-role
+      Description: Allows EventBridge Scheduler to launch the fetch ECS Fargate task.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunFetchTask
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RunTask
+                Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Ref FetchTaskDefinition
+              - Sid: PassRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt TaskExecutionRole.Arn
+                  - !GetAtt TaskRole.Arn
+      Tags:
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── ECS Task Definition ───────────────────────────────────────────────────────
+
+  FetchTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: nlm-ckn-fetch
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemoryMiB
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: fetch
+          Image: !Ref EcrImageUri
+          EntryPoint:
+            - fetch-entrypoint
+          Essential: true
+          Environment:
+            - Name: S3_BUCKET
+              Value: !Ref S3Bucket
+            - Name: CKN_RUN
+              Value: !Ref CknRun
+          Secrets:
+            - Name: NCBI_EMAIL
+              ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/nlm-ckn/ncbi-email'
+            - Name: NCBI_API_KEY
+              ValueFrom: !Ref NcbiApiKeySecret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref FetchLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: fetch
+          StopTimeout: 120
+      Tags:
+        - Key: Project
+          Value: nlm-ckn
+
+  # ── EventBridge Scheduler ─────────────────────────────────────────────────────
+
+  FetchSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: nlm-ckn-fetch-daily
+      Description: Triggers the NLM-CKN external API fetch Fargate task on a daily schedule.
+      ScheduleExpression: !Ref ScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt FetchCluster.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        EcsParameters:
+          TaskDefinitionArn: !Ref FetchTaskDefinition
+          LaunchType: FARGATE
+          NetworkConfiguration:
+            AwsvpcConfiguration:
+              AssignPublicIp: DISABLED
+              SecurityGroups:
+                - !Ref FetchSecurityGroup
+              Subnets: !Ref SubnetIds
+          TaskCount: 1
+        RetryPolicy:
+          MaximumRetryAttempts: 1
+          MaximumEventAgeInSeconds: 3600
+
+Outputs:
+
+  ClusterName:
+    Value: !Ref FetchCluster
+    Description: ECS cluster running the fetch task.
+
+  TaskDefinitionArn:
+    Value: !Ref FetchTaskDefinition
+    Description: ARN of the fetch ECS task definition.
+
+  NcbiEmailParameterName:
+    Value: !Ref NcbiEmailParameter
+    Description: SSM parameter name for the NCBI email (/nlm-ckn/ncbi-email).
+
+  NcbiApiKeySecretArn:
+    Value: !Ref NcbiApiKeySecret
+    Description: Secrets Manager ARN for the NCBI API key.
+
+  LogGroupName:
+    Value: !Ref FetchLogGroup
+    Description: CloudWatch log group for fetch task output (/ecs/nlm-ckn-fetch).
+
+  ScheduleName:
+    Value: !Ref FetchSchedule
+    Description: EventBridge Scheduler schedule name (nlm-ckn-fetch-daily).

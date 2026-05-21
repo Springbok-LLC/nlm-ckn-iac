@@ -1,0 +1,206 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  NLM-CKN GitHub OIDC — IAM role that allows GitHub Actions to push Docker
+  images to ECR without long-lived credentials.
+
+  The role is assumed via GitHub's OIDC provider. Multiple repositories can
+  be granted access via the GitHubRepos parameter.
+
+  Deploy this stack once per account. If a GitHub OIDC provider already
+  exists in the account, set CreateOidcProvider=false to skip creating it.
+
+# ── Parameters ──────────────────────────────────────────────────────────────
+Parameters:
+
+  CreateOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to false if a GitHub Actions OIDC provider already exists in this
+      account (there can only be one per account).
+
+  GitHubRepos:
+    Type: CommaDelimitedList
+    Default: "repo:Springbok-LLC/nlm-ckn-etl:*"
+    Description: >
+      Repositories allowed to assume this role, in "repo:OWNER/REPO:*" format.
+      Comma-separate multiple values.
+
+  EcrStackName:
+    Type: String
+    Default: nlm-ckn-etl-ecr
+    Description: >
+      Name of the ECR CloudFormation stack. The role is granted push access
+      to all repositories in that stack.
+
+  S3BucketName:
+    Type: String
+    Description: >
+      S3 bucket used to stage release tarballs and release.json (the S3_BUCKET
+      secret). The release role is granted s3:PutObject and s3:GetObject on
+      the runs/ prefix of this bucket.
+
+# ── Conditions ──────────────────────────────────────────────────────────────
+Conditions:
+  ShouldCreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+# ── Resources ────────────────────────────────────────────────────────────────
+Resources:
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        # GitHub's OIDC thumbprint (stable; rotated by GitHub with notice)
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nlm-ckn-etl-github-build
+      Description: Assumed by GitHub Actions to build and push ECR images
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:job_workflow_ref: Springbok-LLC/nlm-ckn-etl/.github/workflows/build-image.yml@refs/heads/main
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Ref GitHubRepos
+
+  BuildPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: nlm-ckn-etl-github-build
+      Roles:
+        - !Ref BuildRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # ECR login (account-wide; no resource restriction possible)
+          - Sid: EcrLogin
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: "*"
+
+          # ECR push to pipeline and fetcher repositories
+          - Sid: EcrPush
+            Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:PutImage
+            Resource:
+              - !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/nlm-ckn-etl-pipeline"
+              - !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/nlm-ckn-etl-fetcher"
+
+          # CloudFormation read — resolves ECR repository URIs at build time
+          - Sid: CloudFormationDescribe
+            Effect: Allow
+            Action: cloudformation:DescribeStacks
+            Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${EcrStackName}/*"
+
+  ReleaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nlm-ckn-etl-github-release
+      Description: Assumed by GitHub Actions to submit Batch release jobs and stage artifacts to S3
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:job_workflow_ref: Springbok-LLC/nlm-ckn-etl/.github/workflows/on-release.yml@refs/heads/main
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Ref GitHubRepos
+
+  ReleasePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: nlm-ckn-etl-github-release
+      Roles:
+        - !Ref ReleaseRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Submit release job to the nlm-ckn-release queue
+          - Sid: BatchSubmitJob
+            Effect: Allow
+            Action: batch:SubmitJob
+            Resource:
+              - !Sub "arn:aws:batch:${AWS::Region}:${AWS::AccountId}:job-queue/nlm-ckn-release"
+              - !Sub "arn:aws:batch:${AWS::Region}:${AWS::AccountId}:job-definition/nlm-ckn-release*"
+
+          # Register a new job-definition revision to pin the pipeline image
+          # (containerOverrides does not accept "image"; a new revision is required)
+          - Sid: BatchRegisterJobDefinition
+            Effect: Allow
+            Action: batch:RegisterJobDefinition
+            Resource: !Sub "arn:aws:batch:${AWS::Region}:${AWS::AccountId}:job-definition/nlm-ckn-release*"
+
+          # Read the current job definition to copy its containerProperties
+          - Sid: BatchDescribeJobDefinitions
+            Effect: Allow
+            Action: batch:DescribeJobDefinitions
+            Resource: "*"
+
+          # RegisterJobDefinition re-passes the job/execution roles embedded in
+          # containerProperties, which requires iam:PassRole on those roles
+          - Sid: PassBatchJobRoles
+            Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/nlm-ckn-release-job-role"
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/nlm-ckn-release-job-execution-role"
+            Condition:
+              StringEquals:
+                iam:PassedToService: ecs-tasks.amazonaws.com
+
+          # Stage release tarball and release.json to S3
+          - Sid: S3StageArtifacts
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${S3BucketName}/runs/*"
+
+# ── Outputs ──────────────────────────────────────────────────────────────────
+Outputs:
+
+  BuildRoleArn:
+    Description: ARN of the GitHub Actions build role (use in AWS_BUILD_ROLE_ARN)
+    Value: !GetAtt BuildRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-BuildRoleArn"
+
+  ReleaseRoleArn:
+    Description: ARN of the GitHub Actions release role (use in AWS_RELEASE_ROLE_ARN)
+    Value: !GetAtt ReleaseRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ReleaseRoleArn"
