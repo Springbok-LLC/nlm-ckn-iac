@@ -186,4 +186,4 @@ aws cloudformation deploy \
 
 log "Batch stack ready."
 log "Done. Trigger a release with:"
-log "  bash src/main/shell/trigger-release.sh --tag <tag>"
+log "  bash src/main/shell/trigger-release.sh --nlm-ckn-tag <tag>"
