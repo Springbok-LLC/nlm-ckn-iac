@@ -335,7 +335,7 @@ Resources:
 
   # ── Batch: Job Definition ─────────────────────────────────────────────────────
   #
-  # CELL_KN_TAG (required) and optional TAR_SOURCE / SKIP_ONTOLOGY / RUN_NAME are
+  # CELL_KN_TAG (required) and optional TAR_SOURCE / RUN_NAME are
   # passed as container environment overrides at submit time by trigger-release.sh.
   #
   # The Docker socket is mounted so release.py can start ArangoDB as a sibling
