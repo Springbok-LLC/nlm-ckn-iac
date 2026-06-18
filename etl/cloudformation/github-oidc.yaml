@@ -9,6 +9,37 @@ Description: >
   Deploy this stack once per account. If a GitHub OIDC provider already
   exists in the account, set CreateOidcProvider=false to skip creating it.
 
+# ── Deployment ────────────────────────────────────────────────────────────────
+#
+# Deploy once per AWS account.  The stack creates IAM roles with explicit
+# RoleNames, so CAPABILITY_NAMED_IAM is required.
+#
+#   aws cloudformation deploy \
+#     --stack-name nlm-ckn-etl-github-oidc \
+#     --template-file cloudformation/github-oidc.yaml \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       S3BucketName=<release-artifact-bucket> \
+#       GitHubRepos="repo:Springbok-LLC/nlm-ckn-etl:*"
+#
+# If a GitHub Actions OIDC provider already exists in the account (only one is
+# allowed per account), add CreateOidcProvider=false to --parameter-overrides.
+#
+# After the stack is created/updated, copy the role ARNs from the stack outputs
+# into the corresponding GitHub Actions repository secrets:
+#
+#   BuildRoleArn        → AWS_BUILD_ROLE_ARN          (build-image.yml — release)
+#   FetcherPushRoleArn  → AWS_FETCHER_PUSH_ROLE_ARN   (ci.yml — fetcher push)
+#   ReleaseRoleArn      → AWS_RELEASE_ROLE_ARN         (on-release.yml — Batch job)
+#
+# Read the outputs with:
+#   aws cloudformation describe-stacks \
+#     --stack-name nlm-ckn-etl-github-oidc \
+#     --query "Stacks[0].Outputs" --output table
+#
+# Setting AWS_FETCHER_PUSH_ROLE_ARN is mandatory: without it the ci.yml
+# build-fetcher job cannot assume its role and the push step fails.
+
 # ── Parameters ──────────────────────────────────────────────────────────────
 Parameters:
 
@@ -78,7 +109,12 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:job_workflow_ref: Springbok-LLC/nlm-ckn-etl/.github/workflows/build-image.yml@refs/heads/main
+                # job_workflow_ref is the file defining the job that assumes the
+                # role.  build-image.yml builds both images during a release, so
+                # it needs push access to both repositories.  ci.yml pushes only
+                # the fetcher image and uses the narrower FetcherPushRole below.
+                token.actions.githubusercontent.com:job_workflow_ref:
+                  - Springbok-LLC/nlm-ckn-etl/.github/workflows/build-image.yml@refs/heads/main
               StringLike:
                 token.actions.githubusercontent.com:sub: !Ref GitHubRepos
 
@@ -113,6 +149,66 @@ Resources:
               - !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/nlm-ckn-etl-fetcher"
 
           # CloudFormation read — resolves ECR repository URIs at build time
+          - Sid: CloudFormationDescribe
+            Effect: Allow
+            Action: cloudformation:DescribeStacks
+            Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${EcrStackName}/*"
+
+  # Narrow role for ci.yml, which pushes ONLY the fetcher image on every main
+  # build.  Kept separate from BuildRole so a compromise of the CI workflow
+  # cannot push to the pipeline repository.
+  FetcherPushRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nlm-ckn-etl-github-fetcher-push
+      Description: Assumed by ci.yml to push only the fetcher image to ECR
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:job_workflow_ref: Springbok-LLC/nlm-ckn-etl/.github/workflows/ci.yml@refs/heads/main
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Ref GitHubRepos
+
+  FetcherPushPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: nlm-ckn-etl-github-fetcher-push
+      Roles:
+        - !Ref FetcherPushRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # ECR login (account-wide; no resource restriction possible)
+          - Sid: EcrLogin
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: "*"
+
+          # ECR push restricted to the fetcher repository only
+          - Sid: EcrPushFetcher
+            Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:PutImage
+            Resource:
+              - !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/nlm-ckn-etl-fetcher"
+
+          # CloudFormation read — resolves the fetcher ECR repository URI at build time
           - Sid: CloudFormationDescribe
             Effect: Allow
             Action: cloudformation:DescribeStacks
@@ -198,6 +294,12 @@ Outputs:
     Value: !GetAtt BuildRole.Arn
     Export:
       Name: !Sub "${AWS::StackName}-BuildRoleArn"
+
+  FetcherPushRoleArn:
+    Description: ARN of the ci.yml fetcher-push role (use in AWS_FETCHER_PUSH_ROLE_ARN)
+    Value: !GetAtt FetcherPushRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-FetcherPushRoleArn"
 
   ReleaseRoleArn:
     Description: ARN of the GitHub Actions release role (use in AWS_RELEASE_ROLE_ARN)
