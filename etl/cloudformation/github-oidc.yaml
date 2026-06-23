@@ -109,13 +109,17 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
                 # job_workflow_ref is the file defining the job that assumes the
                 # role.  build-image.yml builds both images during a release, so
                 # it needs push access to both repositories.  ci.yml pushes only
                 # the fetcher image and uses the narrower FetcherPushRole below.
+                #
+                # Releases publish from a tag, so the reusable workflow runs at
+                # refs/tags/<tag>, not refs/heads/main — allow both refs.
                 token.actions.githubusercontent.com:job_workflow_ref:
                   - Springbok-LLC/nlm-ckn-etl/.github/workflows/build-image.yml@refs/heads/main
-              StringLike:
+                  - Springbok-LLC/nlm-ckn-etl/.github/workflows/build-image.yml@refs/tags/*
                 token.actions.githubusercontent.com:sub: !Ref GitHubRepos
 
   BuildPolicy:
@@ -232,8 +236,12 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:job_workflow_ref: Springbok-LLC/nlm-ckn-etl/.github/workflows/on-release.yml@refs/heads/main
               StringLike:
+                # Releases publish from a tag, so on-release.yml runs at
+                # refs/tags/<tag>, not refs/heads/main — allow both refs.
+                token.actions.githubusercontent.com:job_workflow_ref:
+                  - Springbok-LLC/nlm-ckn-etl/.github/workflows/on-release.yml@refs/heads/main
+                  - Springbok-LLC/nlm-ckn-etl/.github/workflows/on-release.yml@refs/tags/*
                 token.actions.githubusercontent.com:sub: !Ref GitHubRepos
 
   ReleasePolicy:
