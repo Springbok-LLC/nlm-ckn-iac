@@ -1,5 +1,11 @@
 # Deployment Guide
 
+Carried over from `nlm-ckn-ui/cloudformation/DEPLOYMENT.md`. Steps that invoke
+`./scripts/app/*.sh` run in the `nlm-ckn-ui` repo, not here — they build and
+ship application code onto infrastructure this repo provisions. Everything
+else (`./deploy/01-deploy-account-setup.sh`, `./deploy/02-deploy-environment.sh`)
+runs from this repo.
+
 ## Prerequisites
 
 - AWS CLI configured with appropriate credentials
@@ -53,7 +59,7 @@ All security groups must be created in the NIH-provided VPC. Replace `<VPC_CIDR>
 
 When `Environment` is not `dev`, the templates skip creating IAM roles and security groups and instead read the pre-created resource IDs/ARNs from SSM Parameter Store. **The stack will fail at deploy time if any of these SSM parameters are missing**, which acts as an explicit pre-flight check.
 
-Populate the following SSM parameters in the NIH account **before** running `deploy-environment.sh` (in `scripts/infra/`):
+Populate the following SSM parameters in the NIH account **before** running `deploy/02-deploy-environment.sh`:
 
 ```bash
 ENV=sandbox   # or prod
@@ -73,7 +79,7 @@ aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-backend-task-arn"  
 aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-random-secret-fn-arn" --value "arn:aws:iam::ACCOUNT:role/cell-kn-${ENV}-random-secret-fn" --type String
 ```
 
-Once all 9 parameters exist, `scripts/infra/deploy-environment.sh sandbox` (or `prod`) will proceed without attempting to create any IAM or security group resources.
+Once all 9 parameters exist, `deploy/02-deploy-environment.sh sandbox` (or `prod`) will proceed without attempting to create any IAM or security group resources.
 
 
 
@@ -103,10 +109,10 @@ aws route53 list-hosted-zones --query 'HostedZones[*].[Id,Name]' --output table
 
 Creates the S3 template bucket, GitHub Actions OIDC role, ECR repository, and ArangoDB dataset S3 bucket. Run once per AWS account.
 
-> **Note**: Edit `GITHUB_ORG` in `scripts/infra/deploy-account-setup.sh` before running.
+> **Note**: Edit `GITHUB_ORG` in `deploy/01-deploy-account-setup.sh` before running.
 
 ```bash
-./scripts/infra/deploy-account-setup.sh
+./deploy/01-deploy-account-setup.sh
 ```
 
 The script displays the target account and prompts for confirmation before deploying anything.
@@ -129,9 +135,9 @@ This only requires the account setup to be complete (ECR URL is read from SSM). 
 #### dev
 
 ```bash
-cp cloudformation/parameters/dev.json.example cloudformation/parameters/dev.json
+cp environment/parameters/dev.json.example environment/parameters/dev.json
 # Edit dev.json with your VPC/subnet/domain values, then:
-./scripts/infra/deploy-environment.sh dev
+./deploy/02-deploy-environment.sh dev
 ```
 
 #### sandbox / prod (NIH restricted accounts)
@@ -139,9 +145,9 @@ cp cloudformation/parameters/dev.json.example cloudformation/parameters/dev.json
 Before deploying to a restricted account, IAM roles and security groups must be pre-created and their IDs stored in SSM. See [Restricted Accounts (sandbox/prod)](#restricted-accounts-sandboxprod) in the Prerequisites section above.
 
 ```bash
-cp cloudformation/parameters/dev.json.example cloudformation/parameters/sandbox.json
+cp environment/parameters/dev.json.example environment/parameters/sandbox.json
 # Edit sandbox.json with NIH VPC/subnet/domain values, then:
-./scripts/infra/deploy-environment.sh sandbox
+./deploy/02-deploy-environment.sh sandbox
 ```
 
 

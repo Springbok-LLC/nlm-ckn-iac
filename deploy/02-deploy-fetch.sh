@@ -2,27 +2,28 @@
 # deploy-fetch.sh — deploy the NLM-CKN fetch stack end-to-end
 #
 # Steps:
-#   1. Deploy cloudformation/ecr.yaml  (creates/updates nlm-ckn-ecr stack)
+#   1. Deploy etl/cloudformation/ecr.yaml  (creates/updates nlm-ckn-ecr stack)
 #   2. Build the fetcher Docker image  (--target fetcher)
 #   3. Push the image to ECR
-#   4. Deploy cloudformation/fetch.yaml (creates/updates nlm-ckn-fetch stack)
+#   4. Deploy etl/cloudformation/fetch.yaml (creates/updates nlm-ckn-fetch stack)
 #
 # Config file (gitignored):
 #   .env  — all required values, loaded automatically if present
 #
 # .env format (KEY=value, no quotes required):
-#   S3_BUCKET=my-bucket
 #   NCBI_EMAIL=user@example.com
 #   NCBI_API_KEY=mykey
 #   VPC_ID=vpc-abc123
 #   SUBNET_IDS=subnet-aaa,subnet-bbb
 #
 # Required values (from .env or env vars):
-#   S3_BUCKET      S3 bucket for external cache and run artifacts
 #   NCBI_EMAIL     NCBI E-Utilities email address
 #   NCBI_API_KEY   NCBI E-Utilities API key (stored in Secrets Manager)
 #   VPC_ID         VPC ID for the Fargate task
 #   SUBNET_IDS     Comma-separated private subnet IDs (e.g. subnet-aaa,subnet-bbb)
+#
+# The S3 bucket is no longer a required value here — fetch.yaml resolves it
+# live from SSM (see the S3Bucket parameter in that template).
 #
 # Optional env vars:
 #   AWS_REGION           AWS region (default: from AWS CLI config)
@@ -35,13 +36,13 @@
 #   TASK_MEMORY_MIB      Fargate memory in MiB (default: 8192)
 #
 # Usage:
-#   bash src/main/shell/deploy-fetch.sh
+#   bash deploy/02-deploy-fetch.sh
 
 set -euo pipefail
 
 # ── Resolve repo root ────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ── Load .env (S3 bucket + NCBI credentials) ─────────────────────────────────
 ENV_FILE="${REPO_ROOT}/.env"
@@ -60,7 +61,6 @@ TASK_MEMORY_MIB="${TASK_MEMORY_MIB:-8192}"
 
 # ── Validate required env vars ───────────────────────────────────────────────
 missing=()
-[[ -z "${S3_BUCKET:-}"    ]] && missing+=(S3_BUCKET)
 [[ -z "${NCBI_EMAIL:-}"   ]] && missing+=(NCBI_EMAIL)
 [[ -z "${NCBI_API_KEY:-}" ]] && missing+=(NCBI_API_KEY)
 [[ -z "${VPC_ID:-}"       ]] && missing+=(VPC_ID)
@@ -90,7 +90,7 @@ export AWS_DEFAULT_REGION="${REGION}"
 # ── Step 1: Deploy ECR stack ─────────────────────────────────────────────────
 log "Deploying ECR stack (${ECR_STACK_NAME})..."
 aws cloudformation deploy \
-  --template-file "${REPO_ROOT}/cloudformation/ecr.yaml" \
+  --template-file "${REPO_ROOT}/etl/cloudformation/ecr.yaml" \
   --stack-name "${ECR_STACK_NAME}" \
   --no-fail-on-empty-changeset
 
@@ -125,12 +125,11 @@ docker push "${FETCHER_REPO_URI}:latest"
 # ── Step 5: Deploy fetch stack ────────────────────────────────────────────────
 log "Deploying fetch stack (${FETCH_STACK_NAME})..."
 aws cloudformation deploy \
-  --template-file "${REPO_ROOT}/cloudformation/fetch.yaml" \
+  --template-file "${REPO_ROOT}/etl/cloudformation/fetch.yaml" \
   --stack-name "${FETCH_STACK_NAME}" \
   --capabilities CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --parameter-overrides \
-    S3Bucket="${S3_BUCKET}" \
     EcrImageUri="${FETCHER_REPO_URI}:latest" \
     NcbiEmail="${NCBI_EMAIL}" \
     NcbiApiKey="${NCBI_API_KEY}" \

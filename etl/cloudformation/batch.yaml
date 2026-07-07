@@ -11,31 +11,43 @@ Description: >
 #
 # NCBI credentials are shared with the fetch stack: NCBI_EMAIL is read from the
 # SSM parameter /nlm-ckn/ncbi-email and NCBI_API_KEY from Secrets Manager at
-# NcbiApiKeySecretArn (both created by cloudformation/fetch.yaml).
+# NcbiApiKeySecretArn (both created by etl/cloudformation/fetch.yaml).
 #
 # Prerequisites:
-#   - cloudformation/fetch.yaml deployed (provides NCBI SSM + Secrets Manager)
-#   - cloudformation/ecr.yaml deployed (provides pipeline image repository)
+#   - etl/cloudformation/fetch.yaml deployed (provides NCBI SSM + Secrets Manager)
+#   - etl/cloudformation/ecr.yaml deployed (provides pipeline image repository)
 #   - Pipeline image pushed to ECR
 #   - Private subnets with NAT gateway (job needs GitHub, NCBI, CELLxGENE, S3)
+#   - shared/cloudformation/shared-resources.yaml deployed (provides the
+#     ArangoDB dataset bucket, mirrored to SSM at S3BucketSsmParameter below)
 #
 # Deploy:
 #   aws cloudformation deploy \
-#     --template-file cloudformation/batch.yaml \
+#     --template-file etl/cloudformation/batch.yaml \
 #     --stack-name nlm-ckn-etl-batch \
 #     --capabilities CAPABILITY_NAMED_IAM \
 #     --parameter-overrides \
-#         S3Bucket=<bucket> \
 #         EcrImageUri=<account>.dkr.ecr.<region>.amazonaws.com/nlm-ckn-etl-pipeline:latest \
 #         NcbiApiKeySecretArn=<arn> \
 #         VpcId=vpc-<id> \
 #         SubnetIds=subnet-<a>,subnet-<b>
+#
+#   S3Bucket resolves from SSM at deploy time — do not pass a literal bucket
+#   name via --parameter-overrides. Override the Default below (its value is
+#   an SSM parameter *name*, not a bucket name) if ProjectName changes.
 
 Parameters:
 
   S3Bucket:
-    Type: String
-    Description: S3 bucket for external cache, baseline dumps, and run artifacts.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /cell-kn/shared/arangodb-bucket-name
+    Description: >
+      S3 bucket for external cache, baseline dumps, and run artifacts. This
+      parameter's value is an SSM parameter name (kept up to date by
+      deploy/01-deploy-account-setup.sh whenever
+      shared/cloudformation/shared-resources.yaml is deployed); CloudFormation
+      resolves it to the live bucket name at deploy time. Change the Default
+      to /nlm-ckn/shared/arangodb-bucket-name after the project rename.
 
   EcrImageUri:
     Type: String

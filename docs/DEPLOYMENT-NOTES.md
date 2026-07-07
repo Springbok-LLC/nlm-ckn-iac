@@ -1,8 +1,8 @@
 # Deployment Notes
 
-A mental model for how `scripts/` and the GitHub workflows fit together, plus
-the procedure for deploying an ArangoDB golden dump. For per-script usage detail
-see [`README.md`](./README.md).
+A mental model for how the deploy scripts and the `nlm-ckn-ui` GitHub workflows
+fit together, plus the procedure for deploying an ArangoDB golden dump. For
+per-script usage detail see [`scripts-README.md`](./scripts-README.md).
 
 ## Architecture in one paragraph
 
@@ -12,28 +12,33 @@ Everything keys off two constants — `PROJECT_NAME="cell-kn"` and
 `cell-kn-<env>-backend`). Scripts discover everything else at runtime from
 CloudFormation outputs/exports, SSM parameters, and Secrets Manager rather than
 hardcoding ARNs, so the same script works across `dev` / `stage` / `sandbox` /
-`prod`. Scripts are split into **infra** (provision/change AWS resources, run
-rarely) and **app** (ship code to existing resources, run every release), with
-standalone ops scripts at the top level.
+`prod`. Scripts are split into this repo's numbered **`deploy/`** scripts
+(provision/change AWS resources, run rarely), `nlm-ckn-ui`'s **`scripts/app/`**
+scripts (ship code to existing resources, run every release), and standalone
+operator scripts under `environment/services/*/scripts/` and `ops/scripts/`.
 
 ## Script map
 
 | Script | Layer | Purpose |
 |---|---|---|
-| `infra/deploy-account-setup.sh` | infra | One-time per account: bootstrap stack (S3 template bucket, GitHub OIDC role, IAM) + shared stack (ECR repo, ArangoDB S3 bucket). Writes `ecr-url` and `arangodb-bucket-name` to SSM. |
-| `infra/deploy-environment.sh <env>` | infra | Provisions one environment via changesets (diff preview, replacement warnings, confirmation prompt). Phase 1: `cell-kn-<env>`. Phase 2: frontend → arangodb → backend. |
-| `app/push-backend-image.sh` | app | Build + push backend image only (bootstrap before first env deploy; also tags `latest`). |
-| `app/deploy-backend.sh <env>` | app | Build → push (immutable git-SHA tag) → register ECS task def → update service → wait stable. |
-| `app/deploy-frontend.sh <env>` | app | `npm ci` + build → `s3 sync --delete` → CloudFront invalidation. |
-| `app/deploy-dataset.sh [--force] <env>` | app | Deploy the dataset named in `ETL_VERSION` via a blue-green `arangorestore` on the EC2 instance (see below). |
-| `app/deploy-all.sh` | app | Runs backend then frontend in sequence. |
-| `arango-tunnel.sh [env]` | ops | SSM port-forward `localhost:8530 → instance:8529` (no SSH / public IP). |
-| `backup-arangodb.sh <env>` | ops | ECS-Exec tar of the data dirs to `s3://.../backups/`. **Note: appears stale** — rejects `stage`, assumes the old ECS-container ArangoDB layout. |
+| `deploy/01-deploy-account-setup.sh` | deploy (this repo) | One-time per account: bootstrap stack (S3 template bucket, GitHub OIDC role, IAM) + shared stack (ECR repo, ArangoDB S3 bucket). Writes `ecr-url` and `arangodb-bucket-name` to SSM. |
+| `deploy/02-deploy-environment.sh <env>` | deploy (this repo) | Provisions one environment via changesets (diff preview, replacement warnings, confirmation prompt). Platform tier first, then frontend → arangodb → backend service stacks. |
+| `deploy/02-deploy-fetch.sh` | deploy (this repo) | Provisions the etl ECR repo + NCBI fetch stack (parallel with `02-deploy-environment.sh`). |
+| `deploy/03-deploy-batch.sh` | deploy (this repo) | Provisions the etl Batch release stack; needs `02-deploy-fetch.sh`'s outputs. |
+| `deploy/03-deploy-monitoring.sh <env>` | deploy (this repo) | Provisions the wedge-detection / CloudWatch monitoring stack; needs `02-deploy-environment.sh`'s outputs. Optional, not wired into `main.yaml`. |
+| `scripts/app/push-backend-image.sh` | app (`nlm-ckn-ui`) | Build + push backend image only (bootstrap before first env deploy; also tags `latest`). |
+| `scripts/app/deploy-backend.sh <env>` | app (`nlm-ckn-ui`) | Build → push (immutable git-SHA tag) → register ECS task def → update service → wait stable. |
+| `scripts/app/deploy-frontend.sh <env>` | app (`nlm-ckn-ui`) | `npm ci` + build → `s3 sync --delete` → CloudFront invalidation. |
+| `scripts/app/deploy-dataset.sh [--force] <env>` | app (`nlm-ckn-ui`) | Deploy the dataset named in `ETL_VERSION` via a blue-green `arangorestore` on the EC2 instance (see below). |
+| `scripts/app/deploy-all.sh` | app (`nlm-ckn-ui`) | Runs backend then frontend in sequence. |
 
 ## Workflow map
 
-All deploy workflows authenticate via **GitHub OIDC** (assume
-`role/cell-kn-github-actions`, created by the bootstrap stack) — no stored AWS keys.
+These GitHub Actions workflows live in `nlm-ckn-ui`, not this repo — listed
+here because they're the callers of the `app/*.sh` scripts above. All deploy
+workflows authenticate via **GitHub OIDC** (assume `role/cell-kn-github-actions`,
+created by `deploy/01-deploy-account-setup.sh`'s bootstrap stack) — no stored
+AWS keys.
 
 | Workflow | Trigger | What it runs |
 |---|---|---|

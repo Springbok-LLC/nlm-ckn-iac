@@ -12,7 +12,7 @@
 # re-run this after any arango stack change to repoint the dashboard.
 #
 # USAGE:
-#   AWS_PROFILE=springbok ./scripts/ops/put-dashboard.sh [env]   # default: stage
+#   AWS_PROFILE=springbok ./environment/services/monitoring/scripts/put-dashboard.sh [env]   # default: stage
 # ==============================================================================
 set -euo pipefail
 

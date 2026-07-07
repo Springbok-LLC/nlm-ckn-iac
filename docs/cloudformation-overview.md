@@ -1,5 +1,9 @@
 # NLM-CKN CloudFormation Infrastructure
 
+Carried over from `nlm-ckn-ui/cloudformation/README.md`. See the top-level
+[README](../README.md) for the current directory layout — the "File
+Structure" section below is superseded by it.
+
 CloudFormation-based infrastructure for deploying the NLM-CKN application to AWS.
 
 **IMPORTANT**: All stacks must be deployed in `us-east-1` due to CloudFront's ACM certificate region requirement.
@@ -48,34 +52,8 @@ Note: VPC and subnets are NIH-provided and taken as stack parameters
 
 ## File Structure
 
-```
-cloudformation/
-├── README.md                           # This file
-├── DEPLOYMENT.md                       # Step-by-step deployment guide (incl. NIH considerations)
-├── TROUBLESHOOTING.md                  # Common issues and fixes
-├── bootstrap/
-│   └── bootstrap.yaml                  # Bootstrap stack
-├── shared/
-│   └── shared-resources.yaml           # Shared ECR and S3
-├── environment/
-│   ├── main.yaml                       # Orchestrator (nested stacks)
-│   ├── secrets.yaml                    # Lambda generates all random secrets
-│   ├── security-groups.yaml            # Security groups
-│   ├── ecs-cluster.yaml                # ECS cluster
-│   ├── service-discovery.yaml          # Cloud Map
-│   ├── alb.yaml                        # Load balancer
-│   ├── arangodb.yaml                   # ArangoDB EC2 instance + EBS
-│   ├── backend.yaml                    # Backend service + auto-scaling
-│   └── frontend.yaml                   # S3 + CloudFront + ACM
-├── scripts/
-│   ├── deploy-bootstrap.sh             # Deploy bootstrap
-│   ├── deploy-shared.sh                # Deploy shared resources
-│   ├── deploy-environment.sh           # Deploy environment stack
-│   ├── deploy-backend.sh               # Build and deploy backend image
-│   └── deploy-dataset.sh              # Load ArangoDB dataset
-└── parameters/
-    └── dev.json.example                # Example parameters file
-```
+See the [top-level README](../README.md#directory-structure) for the current
+directory-by-service layout of this repo.
 
 ## Parameters Reference
 

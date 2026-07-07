@@ -2,7 +2,7 @@
 # ==============================================================================
 # deploy-monitoring.sh - Deploy the ArangoDB monitoring / wedge-detection stack
 # ==============================================================================
-# Deploys cloudformation/environment/monitoring.yaml as the standalone stack
+# Deploys environment/services/monitoring/cloudformation/monitoring.yaml as the standalone stack
 #   cell-kn-<env>-monitoring
 # resolving the private subnets and ArangoDB security group from the infra stack
 # exports (dev/stage) or SSM prereqs (sandbox/prod), the same way
@@ -12,20 +12,24 @@
 # It does NOT run automatically and is not wired into main.yaml.
 #
 # AFTER deploying, run once:
-#   ./scripts/ops/create-monitor-user.sh <env>     # create the RO arango user
-#   ./scripts/ops/put-dashboard.sh <env>           # add cache/wedge widgets
+#   ./environment/services/monitoring/scripts/create-monitor-user.sh <env>   # create the RO arango user
+#   ./environment/services/monitoring/scripts/put-dashboard.sh <env>         # add cache/wedge widgets
 #
 # USAGE:
-#   AWS_PROFILE=springbok ./scripts/ops/deploy-monitoring.sh [env]   # default: stage
+#   AWS_PROFILE=springbok ./deploy/03-deploy-monitoring.sh [env]   # default: stage
 #   AUTO_REMEDIATE=true ALARM_EMAIL=you@example.com ... ./deploy-monitoring.sh stage
 # ==============================================================================
 set -euo pipefail
+
+# Change to repo root (script lives in deploy/) so the relative TEMPLATE path
+# below resolves regardless of the caller's working directory.
+cd "$(dirname "$0")/.."
 
 ENVIRONMENT="${1:-stage}"
 PROJECT_NAME="cell-kn"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 STACK_NAME="${PROJECT_NAME}-${ENVIRONMENT}-monitoring"
-TEMPLATE="cloudformation/environment/monitoring.yaml"
+TEMPLATE="environment/services/monitoring/cloudformation/monitoring.yaml"
 AUTO_REMEDIATE="${AUTO_REMEDIATE:-false}"
 ALARM_EMAIL="${ALARM_EMAIL:-}"
 SCHEDULE_EXPRESSION="${SCHEDULE_EXPRESSION:-rate(1 minute)}"

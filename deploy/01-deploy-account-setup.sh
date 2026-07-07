@@ -6,7 +6,7 @@
 # before deploying any environments.
 #
 # USAGE:
-#   ./scripts/infra/deploy-account-setup.sh
+#   ./deploy/01-deploy-account-setup.sh
 #
 # WHAT IT DOES:
 #   1. Deploys bootstrap stack (S3 buckets, GitHub OIDC, IAM role)
@@ -31,8 +31,8 @@ GITHUB_ORG="Springbok-LLC"
 GITHUB_REPO="nlm-ckn-ui"
 AWS_REGION=${AWS_REGION:-us-east-1}
 
-# Change to project root (script lives in scripts/infra/)
-cd "$(dirname "$0")/../.."
+# Change to repo root (script lives in deploy/)
+cd "$(dirname "$0")/.."
 
 # Resolve current AWS identity
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -64,7 +64,7 @@ echo "  GitHub: $GITHUB_ORG/$GITHUB_REPO"
 echo ""
 
 aws cloudformation deploy \
-  --template-file cloudformation/bootstrap/bootstrap.yaml \
+  --template-file account/cloudformation/bootstrap.yaml \
   --stack-name ${PROJECT_NAME}-bootstrap \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
   --parameter-overrides \
@@ -82,7 +82,7 @@ echo -e "${GREEN}==> Deploying Shared Resources Stack${NC}"
 echo ""
 
 aws cloudformation deploy \
-  --template-file cloudformation/shared/shared-resources.yaml \
+  --template-file shared/cloudformation/shared-resources.yaml \
   --stack-name ${PROJECT_NAME}-shared \
   --parameter-overrides \
     ProjectName=$PROJECT_NAME \
@@ -137,4 +137,4 @@ echo "1. Configure GitHub Actions to use the IAM role:"
 echo "   $GITHUB_ACTIONS_ROLE"
 echo ""
 echo "2. Deploy an environment:"
-echo "   ./scripts/infra/deploy-environment.sh dev"
+echo "   ./deploy/02-deploy-environment.sh dev"

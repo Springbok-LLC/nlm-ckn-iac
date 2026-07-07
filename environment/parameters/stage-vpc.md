@@ -1,18 +1,18 @@
 # Staging VPC Parameters
 
-Parameter choices for `stage-vpc.json` / `cloudformation/network/vpc.yaml`.
+Parameter choices for `stage-vpc.json` / `manual/network/cloudformation/vpc.yaml`.
 
 ## Deploy
 
 ```bash
 aws cloudformation deploy \
   --stack-name cell-kn-stage-vpc \
-  --template-file cloudformation/network/vpc.yaml \
-  --parameter-overrides file://cloudformation/parameters/stage-vpc.json
+  --template-file manual/network/cloudformation/vpc.yaml \
+  --parameter-overrides file://environment/parameters/stage-vpc.json
 ```
 
 After deploying, copy the stack outputs (`VpcId`, `PublicSubnetIds`, `PrivateSubnetIds`,
-`VpcCidr`) into `cloudformation/parameters/stage.json` before running
+`VpcCidr`) into `environment/parameters/stage.json` before running
 `deploy-environment.sh stage`.
 
 ## Address space

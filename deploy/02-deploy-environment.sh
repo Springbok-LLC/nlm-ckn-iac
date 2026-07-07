@@ -17,7 +17,7 @@
 # Each service stack can be redeployed independently without touching the others.
 #
 # USAGE:
-#   ./scripts/infra/deploy-environment.sh <environment> [--infra-only|--services-only] [--auto-approve]
+#   ./deploy/02-deploy-environment.sh <environment> [--infra-only|--services-only] [--auto-approve]
 #
 # ARGUMENTS:
 #   environment    Environment name: dev, sandbox, or prod
@@ -29,8 +29,8 @@
 #   (default: deploy both phases, prompt before each changeset execution)
 #
 # PREREQUISITES:
-#   - Bootstrap stack deployed (./scripts/infra/deploy-account-setup.sh)
-#   - Parameters file: cloudformation/parameters/<env>.json
+#   - Bootstrap stack deployed (./deploy/01-deploy-account-setup.sh)
+#   - Parameters file: environment/parameters/<env>.json
 #   - AWS CLI configured with appropriate credentials
 #   - Templates bucket in S3 (from bootstrap stack)
 # ==============================================================================
@@ -67,10 +67,10 @@ for arg in "${@:2}"; do
 done
 PROJECT_NAME="cell-kn"
 AWS_REGION=${AWS_REGION:-us-east-1}
-PARAMETERS_FILE="cloudformation/parameters/${ENVIRONMENT}.json"
+PARAMETERS_FILE="environment/parameters/${ENVIRONMENT}.json"
 
-# Change to project root (script lives in scripts/infra/)
-cd "$(dirname "$0")/../.."
+# Change to repo root (script lives in deploy/)
+cd "$(dirname "$0")/.."
 
 # Validate environment
 if [[ ! "$ENVIRONMENT" =~ ^(dev|stage|sandbox|prod)$ ]]; then
@@ -83,7 +83,7 @@ fi
 if [ ! -f "$PARAMETERS_FILE" ]; then
   echo -e "${RED}Error: Parameters file not found: $PARAMETERS_FILE${NC}"
   echo "Create it from the example:"
-  echo "  cp cloudformation/parameters/dev.json.example $PARAMETERS_FILE"
+  echo "  cp environment/parameters/dev.json.example $PARAMETERS_FILE"
   echo "  # Edit $PARAMETERS_FILE with your values"
   exit 1
 fi
@@ -102,7 +102,7 @@ TEMPLATES_BUCKET=$(aws cloudformation describe-stacks \
 
 if [ -z "$TEMPLATES_BUCKET" ]; then
   echo -e "${RED}Error: Could not read TemplatesBucketName from ${PROJECT_NAME}-bootstrap stack${NC}"
-  echo "Ensure the bootstrap stack is deployed first: ./scripts/infra/deploy-account-setup.sh"
+  echo "Ensure the bootstrap stack is deployed first: ./deploy/01-deploy-account-setup.sh"
   exit 1
 fi
 
@@ -122,7 +122,9 @@ echo ""
 # Validate templates with cfn-lint if available
 if command -v cfn-lint &> /dev/null; then
   echo -e "${GREEN}==> Validating templates with cfn-lint${NC}"
-  cfn-lint cloudformation/environment/*.yaml cloudformation/bootstrap/*.yaml cloudformation/shared/*.yaml || {
+  cfn-lint account/cloudformation/*.yaml shared/cloudformation/*.yaml \
+    environment/platform/cloudformation/*.yaml environment/services/*/cloudformation/*.yaml \
+    etl/cloudformation/*.yaml manual/*/cloudformation/*.yaml || {
     echo -e "${YELLOW}⚠ cfn-lint found warnings (non-blocking)${NC}"
   }
   echo ""
@@ -130,11 +132,10 @@ fi
 
 # Upload all templates to S3 (required for nested stack TemplateURLs)
 echo -e "${GREEN}==> Uploading templates to S3${NC}"
-aws s3 sync cloudformation/ s3://${TEMPLATES_BUCKET}/ \
-  --exclude ".git/*" \
-  --exclude "scripts/*" \
-  --exclude "parameters/*" \
-  --exclude "*.md" \
+# Only environment/platform/cloudformation/*.yaml are nested stacks (main.yaml's children),
+# so only they need an S3 TemplateURL. Service stacks (frontend/backend/arangodb)
+# deploy via local --template-body and don't need to be uploaded.
+aws s3 sync environment/platform/cloudformation/ s3://${TEMPLATES_BUCKET}/environment/ \
   --region $AWS_REGION
 echo -e "${GREEN}✓ Templates uploaded${NC}"
 echo ""
@@ -392,7 +393,7 @@ print(json.dumps(params))
 
   deploy_stack \
     "$INFRA_STACK" \
-    "cloudformation/environment/main.yaml" \
+    "environment/platform/cloudformation/main.yaml" \
     "$INFRA_PARAMS_FILE" && INFRA_RESULT=$? || INFRA_RESULT=$?
 
   if [ "$INFRA_RESULT" = "1" ]; then
@@ -522,7 +523,7 @@ print(match[0] if match else 'root')
   FRONTEND_RESULT=0
   deploy_stack \
     "${PROJECT_NAME}-${ENVIRONMENT}-frontend" \
-    "cloudformation/environment/frontend.yaml" \
+    "environment/services/frontend/cloudformation/frontend.yaml" \
     "$FRONTEND_PARAMS_FILE" || FRONTEND_RESULT=$?
 
   if [ "$FRONTEND_RESULT" = "1" ]; then
@@ -547,7 +548,7 @@ print(match[0] if match else 'root')
   ARANGO_RESULT=0
   deploy_stack \
     "${PROJECT_NAME}-${ENVIRONMENT}-arangodb" \
-    "cloudformation/environment/arangodb.yaml" \
+    "environment/services/arangodb/cloudformation/arangodb.yaml" \
     "$ARANGO_PARAMS_FILE" || ARANGO_RESULT=$?
 
   if [ "$ARANGO_RESULT" = "1" ]; then
@@ -592,7 +593,7 @@ print(match[0] if match else 'root')
   BACKEND_RESULT=0
   deploy_stack \
     "${PROJECT_NAME}-${ENVIRONMENT}-backend" \
-    "cloudformation/environment/backend.yaml" \
+    "environment/services/backend/cloudformation/backend.yaml" \
     "$BACKEND_PARAMS_FILE" || BACKEND_RESULT=$?
 
   if [ "$BACKEND_RESULT" = "1" ]; then
@@ -642,7 +643,7 @@ if [ "$DEPLOY_MODE" != "--infra-only" ]; then
   echo ""
   echo -e "${YELLOW}Next steps:${NC}"
   echo "1. Build and push backend Docker image:"
-  echo "   ./scripts/app/deploy-backend.sh ${ENVIRONMENT}"
+  echo "   (in nlm-ckn-ui) ./scripts/app/deploy-backend.sh ${ENVIRONMENT}"
   echo ""
   echo "2. Build and deploy frontend:"
   echo "   cd react && npm run build"
@@ -650,5 +651,5 @@ if [ "$DEPLOY_MODE" != "--infra-only" ]; then
   echo "   aws cloudfront create-invalidation --distribution-id ${CF_ID} --paths \"/*\""
   echo ""
   echo "3. (Optional) Deploy dataset:"
-  echo "   ./scripts/app/deploy-dataset.sh ${ENVIRONMENT} datasets/your-file.tar.gz"
+  echo "   (in nlm-ckn-ui) ./scripts/app/deploy-dataset.sh ${ENVIRONMENT} datasets/your-file.tar.gz"
 fi

@@ -1,14 +1,23 @@
 # Deployment Scripts
 
-Automated deployment scripts for NLM-CKN CloudFormation infrastructure and applications.
+Carried over from `nlm-ckn-ui/scripts/README.md` when the CloudFormation
+templates and infrastructure scripts moved into this repo. The **Infrastructure
+Scripts** and **Operations Scripts** sections below describe scripts that now
+live here. The **Application Scripts** section describes scripts that stayed in
+`nlm-ckn-ui` (they ship code to already-provisioned infrastructure and call
+this repo's stacks only via the CloudFormation API, e.g. `describe-stacks`)
+— kept here for context but paths under `scripts/app/` are relative to that repo.
 
 ```
-scripts/
-  infra/    # CloudFormation stack deployments (provision/change infrastructure)
-  app/      # Application deployments (ship code to existing infrastructure)
-  arango-tunnel.sh
-  backup-arangodb.sh
+nlm-ckn-iac/
+  deploy/                            # all deploy scripts, numbered by dependency wave
+  environment/services/*/scripts/    # per-service operator scripts (not deploys)
+  ops/scripts/                       # cross-cutting operator scripts
 ```
+
+Sandbox-account promotion (`deploy-sandbox.sh`, `alb-tunnel.sh`, `resolve-env.sh`)
+isn't in this repo — it's application-promotion tooling (plain-docker-on-EC2 via
+SSM, not a CloudFormation deploy), so it stays in `nlm-ckn-ui/scripts/sandbox/`.
 
 ## Prerequisites
 
@@ -17,27 +26,27 @@ scripts/
 - Node.js and npm installed (for frontend deployment)
 - CloudFormation infrastructure deployed
 
-## Infrastructure Scripts (`scripts/infra/`)
+## Infrastructure Scripts (`deploy/`)
 
 These scripts create or update AWS infrastructure via CloudFormation. Run them when provisioning a new environment or changing infrastructure resources.
 
-### `infra/deploy-account-setup.sh` - Account Setup
+### `01-deploy-account-setup.sh` - Account Setup
 ```bash
-./scripts/infra/deploy-account-setup.sh
+./deploy/01-deploy-account-setup.sh
 ```
 
 One-time setup per AWS account. Creates the S3 template bucket, GitHub Actions OIDC role, ECR repository, and ArangoDB dataset S3 bucket.
 
-### `infra/deploy-environment.sh` - Environment Stack
+### `02-deploy-environment.sh` - Environment Stack
 ```bash
-./scripts/infra/deploy-environment.sh <environment>
+./deploy/02-deploy-environment.sh <environment>
 ```
 
 Deploys the complete environment (dev/staging/prod) with all nested stacks. See script header for details.
 
-## Application Scripts (`scripts/app/`)
+## Application Scripts (`scripts/app/` in `nlm-ckn-ui`)
 
-These scripts build and deploy application code to existing infrastructure. Use these for routine code releases — no CloudFormation changes.
+These scripts build and deploy application code to existing infrastructure. Use these for routine code releases — no CloudFormation changes. They live in the `nlm-ckn-ui` repo, not here.
 
 ### `app/deploy-backend.sh` - Backend Application
 ```bash
@@ -74,39 +83,9 @@ Deploys both backend and frontend in sequence.
 
 Builds and pushes the backend Docker image without updating the ECS service. Useful before the first environment deploy.
 
-## Operations Scripts (`scripts/`)
+## Operations Scripts
 
-### `arango-tunnel.sh` - Connect to ArangoDB via SSM
-```bash
-./scripts/arango-tunnel.sh [environment]        # default: dev (dev|stage|sandbox|prod)
-./scripts/arango-tunnel.sh stage
-./scripts/arango-tunnel.sh dev --show-password  # reveal the root password
-```
-
-Opens an AWS SSM port-forwarding tunnel to the ArangoDB EC2 instance
-(`localhost:8530 → instance:8529`) — no SSH key or public IP needed. It looks up
-the instance from the `cell-kn-<env>-arangodb` CloudFormation stack, fetches the
-root password from Secrets Manager (masked unless `--show-password` /
-`SHOW_PASSWORD=1` is set), then keeps the tunnel open (Ctrl+C to stop).
-
-Once running:
-```bash
-open http://localhost:8530   # Web UI
-arangosh --server.endpoint tcp://localhost:8530 --server.username root --server.password <password>
-```
-
-Requires the AWS Session Manager plugin (needed to open the SSM tunnel) and AWS
-credentials for the target account. Uses your default profile; set
-`AWS_PROFILE=<name>` to select a different one.
-
-### `backup-arangodb.sh` - Create Backup
-```bash
-./scripts/backup-arangodb.sh <environment> [backup-name]
-```
-
-Creates backup of ArangoDB data and uploads it to S3.
-
-### ArangoDB monitoring + wedge detection (`scripts/ops/`)
+### ArangoDB monitoring + wedge detection (`environment/services/monitoring/scripts/`)
 
 Follow-up #2 from the 2026-06-15 stage outage postmortem (tracked in
 [Springbok-LLC/upptime#2](https://github.com/Springbok-LLC/upptime/issues/2)).
@@ -118,18 +97,18 @@ that were missing.
 
 ```bash
 # 1. Deploy the monitoring stack (shows a changeset; operator executes it)
-AWS_PROFILE=springbok ./scripts/ops/deploy-monitoring.sh stage
+AWS_PROFILE=springbok ./deploy/03-deploy-monitoring.sh stage
 # optional: ALARM_EMAIL=you@example.com AUTO_REMEDIATE=false SCHEDULE_EXPRESSION='rate(1 minute)'
 
 # 2. Create the read-only ArangoDB monitoring user (over SSM; do NOT use root)
-AWS_PROFILE=springbok ./scripts/ops/create-monitor-user.sh stage
+AWS_PROFILE=springbok ./environment/services/monitoring/scripts/create-monitor-user.sh stage
 
 # 3. Add the cache + wedge widgets to the correlation dashboard
-AWS_PROFILE=springbok ./scripts/ops/put-dashboard.sh stage
+AWS_PROFILE=springbok ./environment/services/monitoring/scripts/put-dashboard.sh stage
 ```
 
 What the stack (`cell-kn-<env>-monitoring`,
-[monitoring.yaml](../cloudformation/environment/monitoring.yaml)) deploys:
+[monitoring.yaml](../environment/services/monitoring/cloudformation/monitoring.yaml)) deploys:
 
 - **MetricsScraper** (in-VPC Lambda) — scrapes ArangoDB `/_admin/metrics/v2`
   on `arangodb.cell-kn-<env>.local:8529` and pushes leading-signal RocksDB
@@ -183,17 +162,17 @@ near-quota state of the non-dev ArangoDB SG. The stack is **not** wired into
 ### Initial Setup
 ```bash
 # 1. Account setup (one-time per AWS account)
-./scripts/infra/deploy-account-setup.sh
+./deploy/01-deploy-account-setup.sh
 
 # 2. Push initial backend image (before first environment deploy)
 ./scripts/app/push-backend-image.sh
 
 # 3. Configure parameters
-cp cloudformation/parameters/dev.json.example cloudformation/parameters/dev.json
-# Edit cloudformation/parameters/dev.json
+cp environment/parameters/dev.json.example environment/parameters/dev.json
+# Edit environment/parameters/dev.json
 
 # 4. Deploy environment infrastructure
-./scripts/infra/deploy-environment.sh dev
+./deploy/02-deploy-environment.sh dev
 
 # 5. Deploy applications
 ./scripts/app/deploy-all.sh
@@ -219,5 +198,5 @@ All scripts have comprehensive headers with:
 View any script header: `head -50 scripts/app/deploy-backend.sh`
 
 **For more information:**
-- Deployment guide: `cloudformation/DEPLOYMENT.md`
-- CloudFormation infrastructure: `cloudformation/README.md`
+- Deployment guide: `docs/DEPLOYMENT.md`
+- CloudFormation infrastructure: `docs/cloudformation-overview.md`

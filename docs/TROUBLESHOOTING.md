@@ -1,5 +1,10 @@
 # Troubleshooting
 
+Paths under `./scripts/app/*.sh` below run in the `nlm-ckn-ui` repo — they ship
+application code to infrastructure this repo provisions. Everything else
+(`./deploy/*.sh`) runs from this repo. See the top-level [README](../README.md)
+for the full script/directory map.
+
 ## Check Deployment Status
 
 ```bash
@@ -68,7 +73,7 @@ aws ecr describe-images \
   --output table
 
 # Push the backend image if empty
-./scripts/deploy-backend.sh dev
+(in nlm-ckn-ui) ./scripts/app/deploy-backend.sh dev
 ```
 
 **Tasks stuck in PENDING or fail immediately**
@@ -109,7 +114,7 @@ aws ecr describe-images \
   --output table
 
 # Deploy a specific tag
-IMAGE_TAG=abc1234 ./scripts/deploy-backend.sh dev
+(in nlm-ckn-ui) IMAGE_TAG=abc1234 ./scripts/app/deploy-backend.sh dev
 ```
 
 ---
@@ -155,7 +160,7 @@ aws ssm get-parameter \
 
 **Force a dataset reload**
 ```bash
-./scripts/deploy-dataset.sh dev datasets/your-file.tar.gz
+(in nlm-ckn-ui) ./scripts/app/deploy-dataset.sh dev datasets/your-file.tar.gz
 ```
 
 **EFS mount issues — tasks start but ArangoDB fails immediately**

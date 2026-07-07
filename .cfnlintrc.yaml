@@ -1,4 +1,6 @@
-# cfn-lint configuration for cell-kn CloudFormation templates
+# cfn-lint configuration for nlm-ckn-iac CloudFormation templates
+# (covers both the cell-kn-named app stacks, pending rename, and the
+# nlm-ckn-etl-named pipeline stacks)
 # https://github.com/aws-cloudformation/cfn-lint
 
 # Suppress W1030 for parameters that are intentionally empty in dev and

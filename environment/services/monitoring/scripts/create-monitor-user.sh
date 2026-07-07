@@ -13,7 +13,7 @@
 # deploying the monitoring stack, and again whenever the secret is rotated.
 #
 # USAGE:
-#   AWS_PROFILE=springbok ./scripts/ops/create-monitor-user.sh [env]   # default: stage
+#   AWS_PROFILE=springbok ./environment/services/monitoring/scripts/create-monitor-user.sh [env]   # default: stage
 # ==============================================================================
 set -euo pipefail
 

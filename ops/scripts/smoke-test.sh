@@ -12,7 +12,7 @@
 # Nothing is restarted, resized, or restored.
 #
 # USAGE:
-#   AWS_PROFILE=springbok ./scripts/ops/smoke-test.sh [env] [options]
+#   AWS_PROFILE=springbok ./ops/scripts/smoke-test.sh [env] [options]
 #
 #   env             Environment: dev | stage | prod | sandbox (default: stage).
 #                   Used to resolve the base URL from the frontend stack output.

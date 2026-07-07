@@ -321,7 +321,7 @@ Outputs:
 
       Next steps (run in order):
       1. Deploy service stacks:
-         ./scripts/deploy-environment.sh ${Environment}
+         ./deploy/02-deploy-environment.sh ${Environment}
          (select "service stacks" phase when prompted, or run the full deploy)
 
       2. Build and push backend Docker image:

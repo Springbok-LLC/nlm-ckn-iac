@@ -380,5 +380,5 @@ Outputs:
     Value: !Sub |
       Bootstrap complete! Next steps:
       1. Configure GitHub Actions to use role: ${GitHubActionsRole.Arn}
-      2. Deploy an environment: ./scripts/deploy-environment.sh dev
-      See cloudformation/DEPLOYMENT.md for full details.
+      2. Deploy an environment: ./deploy/02-deploy-environment.sh dev
+      See docs/DEPLOYMENT.md for full details.

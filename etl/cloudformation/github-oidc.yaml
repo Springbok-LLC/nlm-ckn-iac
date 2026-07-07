@@ -16,11 +16,13 @@ Description: >
 #
 #   aws cloudformation deploy \
 #     --stack-name nlm-ckn-etl-github-oidc \
-#     --template-file cloudformation/github-oidc.yaml \
+#     --template-file etl/cloudformation/github-oidc.yaml \
 #     --capabilities CAPABILITY_NAMED_IAM \
 #     --parameter-overrides \
-#       S3BucketName=<release-artifact-bucket> \
 #       GitHubRepos="repo:Springbok-LLC/nlm-ckn-etl:*"
+#
+#   S3BucketName resolves from SSM at deploy time — do not pass a literal
+#   bucket name via --parameter-overrides.
 #
 # If a GitHub Actions OIDC provider already exists in the account (only one is
 # allowed per account), add CreateOidcProvider=false to --parameter-overrides.
@@ -66,11 +68,17 @@ Parameters:
       to all repositories in that stack.
 
   S3BucketName:
-    Type: String
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /cell-kn/shared/arangodb-bucket-name
     Description: >
       S3 bucket used to stage release tarballs and release.json (the S3_BUCKET
       secret). The release role is granted s3:PutObject and s3:GetObject on
-      the runs/ prefix of this bucket.
+      the runs/ prefix of this bucket. This parameter's value is an SSM
+      parameter name (kept up to date by
+      deploy/01-deploy-account-setup.sh whenever
+      shared/cloudformation/shared-resources.yaml is deployed); CloudFormation
+      resolves it to the live bucket name at deploy time. Change the Default
+      to /nlm-ckn/shared/arangodb-bucket-name after the project rename.
 
 # ── Conditions ──────────────────────────────────────────────────────────────
 Conditions:

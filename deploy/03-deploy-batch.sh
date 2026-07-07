@@ -2,29 +2,30 @@
 # deploy-batch.sh — deploy the NLM-CKN Batch release stack end-to-end.
 #
 # Steps:
-#   1. Deploy cloudformation/ecr.yaml        (creates/updates nlm-ckn-etl-ecr)
+#   1. Deploy etl/cloudformation/ecr.yaml        (creates/updates nlm-ckn-etl-ecr)
 #   2. Build the pipeline Docker image       (--target pipeline, includes JRE)
 #   3. Push the image to ECR
-#   4. Deploy cloudformation/batch.yaml      (creates/updates nlm-ckn-etl-batch)
+#   4. Deploy etl/cloudformation/batch.yaml      (creates/updates nlm-ckn-etl-batch)
 #
 # Prerequisites:
-#   - cloudformation/fetch.yaml already deployed (provides NCBI SSM + Secrets Manager)
+#   - etl/cloudformation/fetch.yaml already deployed (provides NCBI SSM + Secrets Manager)
 #   - AWS credentials with CloudFormation, ECR, IAM, Batch, EC2, and Logs permissions
 #
 # Config file (gitignored):
 #   .env  — all required values, loaded automatically if present
 #
 # .env format (KEY=value, no quotes required):
-#   S3_BUCKET=my-bucket
 #   VPC_ID=vpc-abc123
 #   SUBNET_IDS=subnet-aaa,subnet-bbb
 #   NCBI_API_KEY_SECRET_ARN=arn:aws:secretsmanager:...
 #
 # Required values (from .env or env vars):
-#   S3_BUCKET                 S3 bucket for cache and run artifacts
 #   VPC_ID                    VPC ID for the Batch compute environment
 #   SUBNET_IDS                Comma-separated private subnet IDs with NAT gateway
 #   NCBI_API_KEY_SECRET_ARN   Secrets Manager ARN from the fetch stack output
+#
+# The S3 bucket is no longer a required value here — batch.yaml resolves it
+# live from SSM (see the S3Bucket parameter in that template).
 #
 # Optional env vars:
 #   GITHUB_TOKEN         GitHub token for deployment status updates. When set,
@@ -41,13 +42,13 @@
 #   EBS_VOLUME_GIB       Root EBS volume size in GiB (default: 200)
 #
 # Usage:
-#   bash src/main/shell/deploy-batch.sh
+#   bash deploy/03-deploy-batch.sh
 
 set -euo pipefail
 
 # ── Resolve repo root and load .env ──────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 ENV_FILE="${REPO_ROOT}/.env"
 if [[ -f "${ENV_FILE}" ]]; then
@@ -65,7 +66,6 @@ EBS_VOLUME_GIB="${EBS_VOLUME_GIB:-200}"
 
 # ── Validate required env vars ────────────────────────────────────────────────
 missing=()
-[[ -z "${S3_BUCKET:-}"    ]] && missing+=(S3_BUCKET)
 [[ -z "${VPC_ID:-}"       ]] && missing+=(VPC_ID)
 [[ -z "${SUBNET_IDS:-}"   ]] && missing+=(SUBNET_IDS)
 
@@ -93,7 +93,7 @@ export AWS_DEFAULT_REGION="${REGION}"
 # ── Step 1: Deploy ECR stack ──────────────────────────────────────────────────
 log "Deploying ECR stack (${ECR_STACK_NAME})..."
 aws cloudformation deploy \
-  --template-file "${REPO_ROOT}/cloudformation/ecr.yaml" \
+  --template-file "${REPO_ROOT}/etl/cloudformation/ecr.yaml" \
   --stack-name    "${ECR_STACK_NAME}" \
   --no-fail-on-empty-changeset
 
@@ -169,12 +169,11 @@ fi
 # ── Step 6: Deploy Batch stack ────────────────────────────────────────────────
 log "Deploying Batch stack (${BATCH_STACK_NAME})..."
 aws cloudformation deploy \
-  --template-file "${REPO_ROOT}/cloudformation/batch.yaml" \
+  --template-file "${REPO_ROOT}/etl/cloudformation/batch.yaml" \
   --stack-name    "${BATCH_STACK_NAME}" \
   --capabilities  CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --parameter-overrides \
-    S3Bucket="${S3_BUCKET}" \
     EcrImageUri="${PIPELINE_REPO_URI}:latest" \
     NcbiApiKeySecretArn="${NCBI_API_KEY_SECRET_ARN}" \
     GithubTokenSecretArn="${GITHUB_TOKEN_SECRET_ARN}" \
