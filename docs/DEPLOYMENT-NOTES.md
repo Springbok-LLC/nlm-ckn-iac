@@ -2,7 +2,7 @@
 
 A mental model for how the deploy scripts and the `nlm-ckn-ui` GitHub workflows
 fit together, plus the procedure for deploying an ArangoDB golden dump. For
-per-script usage detail see [`scripts-README.md`](./scripts-README.md).
+per-script usage detail see [`deploy/README.md`](../deploy/README.md).
 
 ## Architecture in one paragraph
 
