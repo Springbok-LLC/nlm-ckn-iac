@@ -26,7 +26,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration
-PROJECT_NAME="cell-kn"
+PROJECT_NAME="nlm-ckn"
 GITHUB_ORG="Springbok-LLC"
 GITHUB_REPO="nlm-ckn-ui"
 AWS_REGION=${AWS_REGION:-us-east-1}

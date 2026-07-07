@@ -6,10 +6,10 @@ per-script usage detail see [`scripts-README.md`](./scripts-README.md).
 
 ## Architecture in one paragraph
 
-Everything keys off two constants — `PROJECT_NAME="cell-kn"` and
+Everything keys off two constants — `PROJECT_NAME="nlm-ckn"` and
 `AWS_REGION=us-east-1` — and a strict stack-naming convention
-(`cell-kn-<env>`, `cell-kn-<env>-frontend`, `cell-kn-<env>-arangodb`,
-`cell-kn-<env>-backend`). Scripts discover everything else at runtime from
+(`nlm-ckn-<env>`, `nlm-ckn-<env>-frontend`, `nlm-ckn-<env>-arangodb`,
+`nlm-ckn-<env>-backend`). Scripts discover everything else at runtime from
 CloudFormation outputs/exports, SSM parameters, and Secrets Manager rather than
 hardcoding ARNs, so the same script works across `dev` / `stage` / `sandbox` /
 `prod`. Scripts are split into this repo's numbered **`deploy/`** scripts
@@ -36,7 +36,7 @@ operator scripts under `environment/services/*/scripts/` and `ops/scripts/`.
 
 These GitHub Actions workflows live in `nlm-ckn-ui`, not this repo — listed
 here because they're the callers of the `app/*.sh` scripts above. All deploy
-workflows authenticate via **GitHub OIDC** (assume `role/cell-kn-github-actions`,
+workflows authenticate via **GitHub OIDC** (assume `role/nlm-ckn-github-actions`,
 created by `deploy/01-deploy-account-setup.sh`'s bootstrap stack) — no stored
 AWS keys.
 
@@ -57,13 +57,13 @@ the restore. The expected key is hard-coded as:
 runs/<ETL_VERSION>/06-golden-dump.tar.gz
 ```
 
-in the shared bucket (name in SSM at `/cell-kn/shared/arangodb-bucket-name`).
+in the shared bucket (name in SSM at `/nlm-ckn/shared/arangodb-bucket-name`).
 
 **1. Upload your dump to the exact key** (`ETL_VERSION` here is `v1.4.6-alpha.34`):
 
 ```bash
 BUCKET=$(aws ssm get-parameter \
-  --name /cell-kn/shared/arangodb-bucket-name \
+  --name /nlm-ckn/shared/arangodb-bucket-name \
   --query Parameter.Value --output text --region us-east-1)
 
 aws s3 cp /path/to/your-golden-dump.tar.gz \

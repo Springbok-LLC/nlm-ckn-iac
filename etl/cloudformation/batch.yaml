@@ -40,14 +40,14 @@ Parameters:
 
   S3Bucket:
     Type: AWS::SSM::Parameter::Value<String>
-    Default: /cell-kn/shared/arangodb-bucket-name
+    Default: /nlm-ckn/shared/arangodb-bucket-name
     Description: >
       S3 bucket for external cache, baseline dumps, and run artifacts. This
       parameter's value is an SSM parameter name (kept up to date by
       deploy/01-deploy-account-setup.sh whenever
       shared/cloudformation/shared-resources.yaml is deployed); CloudFormation
-      resolves it to the live bucket name at deploy time. Change the Default
-      to /nlm-ckn/shared/arangodb-bucket-name after the project rename.
+      resolves it to the live bucket name at deploy time.
+
 
   EcrImageUri:
     Type: String

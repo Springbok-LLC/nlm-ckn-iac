@@ -4,7 +4,7 @@ Description: 'Security groups for Cell-KN application services'
 Parameters:
   ProjectName:
     Type: String
-    Default: cell-kn
+    Default: nlm-ckn
     Description: Project name for resource naming
 
   Environment:

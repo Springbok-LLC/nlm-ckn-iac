@@ -1,5 +1,5 @@
 # cfn-lint configuration for nlm-ckn-iac CloudFormation templates
-# (covers both the cell-kn-named app stacks, pending rename, and the
+# (covers both the nlm-ckn-named app stacks, pending rename, and the
 # nlm-ckn-etl-named pipeline stacks)
 # https://github.com/aws-cloudformation/cfn-lint
 

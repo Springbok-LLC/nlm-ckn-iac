@@ -4,7 +4,7 @@ Description: 'Cell-KN Environment Stack - Orchestrates all nested stacks'
 Parameters:
   ProjectName:
     Type: String
-    Default: cell-kn
+    Default: nlm-ckn
     Description: Project name for resource naming
 
   Environment:
@@ -38,7 +38,7 @@ Parameters:
   # Application Configuration
   DomainName:
     Type: String
-    Description: Base domain name (e.g., cell-kn-mvp.org)
+    Description: Base domain name (e.g., nlm-ckn.org)
 
   HostedZoneId:
     Type: String
@@ -235,7 +235,7 @@ Resources:
 Outputs:
   # ============================================================================
   # Cross-stack exports consumed by the tier-2 service stacks
-  # (cell-kn-<env>-arangodb, cell-kn-<env>-backend, cell-kn-<env>-frontend).
+  # (nlm-ckn-<env>-arangodb, nlm-ckn-<env>-backend, nlm-ckn-<env>-frontend).
   # These stacks are deployed independently via deploy-environment.sh after
   # this infra stack is stable.
   # ============================================================================

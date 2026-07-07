@@ -4,7 +4,7 @@ Description: 'VPC and subnet infrastructure for Cell-KN Staging environment'
 Parameters:
   ProjectName:
     Type: String
-    Default: cell-kn
+    Default: nlm-ckn
     Description: Project name for resource naming
 
   Environment:

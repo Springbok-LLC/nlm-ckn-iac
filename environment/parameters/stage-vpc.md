@@ -6,7 +6,7 @@ Parameter choices for `stage-vpc.json` / `manual/network/cloudformation/vpc.yaml
 
 ```bash
 aws cloudformation deploy \
-  --stack-name cell-kn-stage-vpc \
+  --stack-name nlm-ckn-stage-vpc \
   --template-file manual/network/cloudformation/vpc.yaml \
   --parameter-overrides file://environment/parameters/stage-vpc.json
 ```

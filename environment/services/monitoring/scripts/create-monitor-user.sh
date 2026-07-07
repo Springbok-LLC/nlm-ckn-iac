@@ -2,8 +2,8 @@
 # ==============================================================================
 # create-monitor-user.sh - Create/refresh the read-only ArangoDB monitoring user
 # ==============================================================================
-# The monitoring stack (cell-kn-<env>-monitoring) mints a password secret at
-#   /cell-kn/<env>/secrets/arangodb-monitor-password
+# The monitoring stack (nlm-ckn-<env>-monitoring) mints a password secret at
+#   /nlm-ckn/<env>/secrets/arangodb-monitor-password
 # but the ArangoDB *user* itself must be created inside the DB. This script does
 # that over SSM (no inbound access needed): it runs arangosh inside the running
 # arangodb container on the EC2 host, authenticating as root, and creates a user
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 ENVIRONMENT="${1:-stage}"
-PROJECT_NAME="cell-kn"
+PROJECT_NAME="nlm-ckn"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 MONITOR_USER="${MONITOR_USER:-monitor}"
 STACK_NAME="${PROJECT_NAME}-${ENVIRONMENT}-arangodb"
@@ -42,7 +42,7 @@ MONITOR_SECRET="/${PROJECT_NAME}/${ENVIRONMENT}/secrets/arangodb-monitor-passwor
 
 # Build the remote script. arangosh runs INSIDE the container; both secrets are
 # fetched on the host via the instance role (which already has SecretsManager
-# GetSecretValue for /cell-kn/<env>/secrets/*).
+# GetSecretValue for /nlm-ckn/<env>/secrets/*).
 read -r -d '' REMOTE <<REMOTE_EOF || true
 set -euo pipefail
 REGION="${AWS_REGION}"

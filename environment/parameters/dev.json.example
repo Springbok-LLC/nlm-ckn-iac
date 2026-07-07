@@ -1,7 +1,7 @@
 [
   {
     "ParameterKey": "ProjectName",
-    "ParameterValue": "cell-kn"
+    "ParameterValue": "nlm-ckn"
   },
   {
     "ParameterKey": "Environment",
@@ -25,7 +25,7 @@
   },
   {
     "ParameterKey": "DomainName",
-    "ParameterValue": "cell-kn-mvp.org"
+    "ParameterValue": "nlm-ckn.org"
   },
   {
     "ParameterKey": "HostedZoneId",

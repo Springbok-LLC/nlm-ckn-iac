@@ -32,7 +32,7 @@ ENVIRONMENT="stage"
 BASE_URL="${BASE_URL:-}"
 TIMEOUT=10
 INSECURE=""
-PROJECT="cell-kn"
+PROJECT="nlm-ckn"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 
 while [ $# -gt 0 ]; do

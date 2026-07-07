@@ -17,7 +17,7 @@
 set -euo pipefail
 
 ENVIRONMENT="${1:-stage}"
-P=cell-kn
+P=nlm-ckn
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 DASH="${P}-${ENVIRONMENT}-correlation"
 CLUSTER="${P}-${ENVIRONMENT}-cluster"
@@ -101,7 +101,7 @@ widgets=[
       "query":"SOURCE '%s' | fields @timestamp, @message | filter @message like /WORKER TIMEOUT/ | sort @timestamp desc | limit 50" % LOG}),
 
   # Row 5 -- ArangoDB RocksDB cache (leading signals)  |  host wedge detection
-  # Custom metrics pushed by the monitoring stack (cell-kn-<env>-monitoring):
+  # Custom metrics pushed by the monitoring stack (nlm-ckn-<env>-monitoring):
   #   CellKN/ArangoDB  scraped from /_admin/metrics/v2
   #   CellKN/Monitoring  SSM/EC2 wedge-signature check
   # A sustained drop in recent hit rate is the early "cold/slow DB" warning;

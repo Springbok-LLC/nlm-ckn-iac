@@ -69,7 +69,7 @@ Parameters:
 
   S3BucketName:
     Type: AWS::SSM::Parameter::Value<String>
-    Default: /cell-kn/shared/arangodb-bucket-name
+    Default: /nlm-ckn/shared/arangodb-bucket-name
     Description: >
       S3 bucket used to stage release tarballs and release.json (the S3_BUCKET
       secret). The release role is granted s3:PutObject and s3:GetObject on
@@ -77,8 +77,8 @@ Parameters:
       parameter name (kept up to date by
       deploy/01-deploy-account-setup.sh whenever
       shared/cloudformation/shared-resources.yaml is deployed); CloudFormation
-      resolves it to the live bucket name at deploy time. Change the Default
-      to /nlm-ckn/shared/arangodb-bucket-name after the project rename.
+      resolves it to the live bucket name at deploy time.
+
 
 # ── Conditions ──────────────────────────────────────────────────────────────
 Conditions:

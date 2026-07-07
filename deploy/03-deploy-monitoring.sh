@@ -3,7 +3,7 @@
 # deploy-monitoring.sh - Deploy the ArangoDB monitoring / wedge-detection stack
 # ==============================================================================
 # Deploys environment/services/monitoring/cloudformation/monitoring.yaml as the standalone stack
-#   cell-kn-<env>-monitoring
+#   nlm-ckn-<env>-monitoring
 # resolving the private subnets and ArangoDB security group from the infra stack
 # exports (dev/stage) or SSM prereqs (sandbox/prod), the same way
 # deploy-environment.sh resolves them for the service stacks.
@@ -26,7 +26,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ENVIRONMENT="${1:-stage}"
-PROJECT_NAME="cell-kn"
+PROJECT_NAME="nlm-ckn"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 STACK_NAME="${PROJECT_NAME}-${ENVIRONMENT}-monitoring"
 TEMPLATE="environment/services/monitoring/cloudformation/monitoring.yaml"

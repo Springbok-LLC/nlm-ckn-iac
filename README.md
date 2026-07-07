@@ -91,45 +91,13 @@ live under `manual/`, which holds exactly this kind of out-of-band stack (no
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full walkthrough (including NIH sandbox/prod account restrictions) and [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues.
 
-## Naming: still `cell-kn`, pending rename to `nlm-ckn`
+## Migrating from the old `cell-kn` deployment
 
-The project renamed from Cell-KN to NLM-CKN, but the UI-side stacks were
-originally deployed under the old name — every template already
-parameterizes on `ProjectName`, but scripts and `environment/parameters/*.json`
-still hardcode `"cell-kn"`. `DomainName` is already `nlm-ckn.org`, so DNS is
-unaffected. Since S3 bucket names and stack names can't be renamed in place,
-this is a parallel-stack cutover, not an in-place edit. The ETL-side stacks
-themselves (`nlm-ckn-etl-*`, `nlm-ckn-fetch`, `nlm-ckn-release`) are already
-named `nlm-ckn-*` and don't need renaming — but they still need attention
-below because they consume a resource (the shared dataset bucket) that *is*
-moving.
-
-Checklist, in order:
-
-1. **Deploy the new account/shared/platform stacks** under `ProjectName=nlm-ckn`
-   (`deploy/01-deploy-account-setup.sh`, then
-   `deploy/02-deploy-environment.sh <env>`) — this creates a *new* S3
-   templates bucket, state bucket, and ArangoDB dataset bucket
-   (`nlm-ckn-arangodb-data-<account-id>`) alongside the existing `cell-kn-*`
-   ones; nothing old is touched yet.
-2. **Update `PROJECT_NAME="cell-kn"` to `"nlm-ckn"`** in the `nlm-ckn-ui`
-   app scripts (`scripts/app/*.sh`) and in this repo's own scripts/parameter
-   files, and update the CI `role-to-assume` ARN
-   (`cell-kn-github-actions` → `nlm-ckn-github-actions`).
-3. **Redeploy the ETL stacks with the new bucket.** `etl/cloudformation/{batch,fetch,github-oidc}.yaml`
-   resolve their S3 bucket from an SSM parameter (`AWS::SSM::Parameter::Value<String>`,
-   see `S3Bucket`/`S3BucketName` in those templates) rather than a
-   hand-typed name, specifically so this step is a one-line change: update
-   each template's `Default` from `/cell-kn/shared/arangodb-bucket-name` to
-   `/nlm-ckn/shared/arangodb-bucket-name`, then redeploy
-   (`deploy/03-deploy-batch.sh`, `deploy-fetch.sh`, and `github-oidc.yaml`
-   manually per its own header). This is still a manual, deliberate step —
-   CloudFormation only re-resolves the SSM value at deploy time, and only
-   once you're pointed at the new parameter name.
-4. **Verify, then cut over** DNS/ALB traffic to the new environment stack,
-   smoke test, and only then decommission the `cell-kn-*` stacks (including
-   the old dataset bucket, once nothing references it — S3 buckets must be
-   emptied before they can be deleted).
+This repo deploys `nlm-ckn`-named resources (`ProjectName=nlm-ckn`). The project
+was originally deployed under the old name `cell-kn`; replacing that deployment
+is a parallel-stack cutover — deploy the new `nlm-ckn-*` stacks alongside the
+old ones, verify, switch traffic, then decommission. See the step-by-step
+runbook in [docs/cutover-to-nlm-ckn.md](docs/cutover-to-nlm-ckn.md).
 
 ## Prerequisites
 

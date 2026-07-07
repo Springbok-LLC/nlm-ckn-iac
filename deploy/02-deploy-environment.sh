@@ -4,15 +4,15 @@
 # ==============================================================================
 # Deploys the Cell-KN environment in two phases:
 #
-#   Phase 1 — Infra stack (cell-kn-<env>):
+#   Phase 1 — Infra stack (nlm-ckn-<env>):
 #     Nested stacks: secrets, security-groups (dev only), ecs-cluster,
 #     service-discovery, alb
 #     Exports cross-stack values consumed by the service stacks.
 #
 #   Phase 2 — Service stacks:
-#     cell-kn-<env>-frontend  → frontend.yaml  (first: no deps on arangodb/backend)
-#     cell-kn-<env>-arangodb  → arangodb.yaml  (slow: up to 20 min EC2 init)
-#     cell-kn-<env>-backend   → backend.yaml   (last: depends on arangodb-dns)
+#     nlm-ckn-<env>-frontend  → frontend.yaml  (first: no deps on arangodb/backend)
+#     nlm-ckn-<env>-arangodb  → arangodb.yaml  (slow: up to 20 min EC2 init)
+#     nlm-ckn-<env>-backend   → backend.yaml   (last: depends on arangodb-dns)
 #
 # Each service stack can be redeployed independently without touching the others.
 #
@@ -65,7 +65,7 @@ for arg in "${@:2}"; do
        exit 1 ;;
   esac
 done
-PROJECT_NAME="cell-kn"
+PROJECT_NAME="nlm-ckn"
 AWS_REGION=${AWS_REGION:-us-east-1}
 PARAMETERS_FILE="environment/parameters/${ENVIRONMENT}.json"
 

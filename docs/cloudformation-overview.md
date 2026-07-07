@@ -61,13 +61,13 @@ directory-by-service layout of this repo.
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
-| `ProjectName` | Project name | `cell-kn` |
+| `ProjectName` | Project name | `nlm-ckn` |
 | `Environment` | Environment name | `dev`, `sandbox`, `prod` |
 | `VpcId` | VPC ID (NIH-provided) | `vpc-12345678` |
 | `VpcCidr` | VPC CIDR for security group rules | `10.x.x.x/16` |
 | `PublicSubnetIds` | Public subnet IDs for ALB (min 2) | `subnet-abc123,subnet-def456` |
 | `PrivateSubnetIds` | Private subnet IDs for ECS tasks (min 1) | `subnet-ghi789,subnet-jkl012` |
-| `DomainName` | Base domain name | `cell-kn-mvp.org` |
+| `DomainName` | Base domain name | `nlm-ckn.org` |
 | `HostedZoneId` | Route 53 hosted zone ID | `Z018047920VCMG6465Q74` |
 
 ### Optional
@@ -82,26 +82,26 @@ directory-by-service layout of this repo.
 ### From Shared Resources Stack
 
 ```
-cell-kn-shared-ecr-url              # ECR repository URL
-cell-kn-shared-ecr-arn              # ECR repository ARN
-cell-kn-shared-ecr-name             # ECR repository name
-cell-kn-shared-arangodb-bucket      # S3 bucket name for datasets
-cell-kn-shared-arangodb-bucket-arn  # S3 bucket ARN
+nlm-ckn-shared-ecr-url              # ECR repository URL
+nlm-ckn-shared-ecr-arn              # ECR repository ARN
+nlm-ckn-shared-ecr-name             # ECR repository name
+nlm-ckn-shared-arangodb-bucket      # S3 bucket name for datasets
+nlm-ckn-shared-arangodb-bucket-arn  # S3 bucket ARN
 ```
 
 ### From Environment Stack
 
 ```
-cell-kn-<env>-vpc-id                    # VPC ID
-cell-kn-<env>-ecs-cluster-name          # ECS cluster name (backend only)
-cell-kn-<env>-alb-dns-name              # ALB DNS name
-cell-kn-<env>-cloudfront-domain         # CloudFront domain name
-cell-kn-<env>-backend-url               # Backend URL
-cell-kn-<env>-frontend-url              # Frontend URL
-cell-kn-<env>-arangodb-instance-id      # ArangoDB EC2 instance ID
-cell-kn-<env>-arangodb-private-ip       # ArangoDB EC2 private IP
-cell-kn-<env>-arangodb-dns              # ArangoDB Cloud Map DNS name
-cell-kn-<env>-dataset-version-param     # SSM parameter name for dataset version
+nlm-ckn-<env>-vpc-id                    # VPC ID
+nlm-ckn-<env>-ecs-cluster-name          # ECS cluster name (backend only)
+nlm-ckn-<env>-alb-dns-name              # ALB DNS name
+nlm-ckn-<env>-cloudfront-domain         # CloudFront domain name
+nlm-ckn-<env>-backend-url               # Backend URL
+nlm-ckn-<env>-frontend-url              # Frontend URL
+nlm-ckn-<env>-arangodb-instance-id      # ArangoDB EC2 instance ID
+nlm-ckn-<env>-arangodb-private-ip       # ArangoDB EC2 private IP
+nlm-ckn-<env>-arangodb-dns              # ArangoDB Cloud Map DNS name
+nlm-ckn-<env>-dataset-version-param     # SSM parameter name for dataset version
 ```
 
 

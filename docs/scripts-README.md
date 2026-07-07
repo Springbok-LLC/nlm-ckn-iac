@@ -107,17 +107,17 @@ AWS_PROFILE=springbok ./environment/services/monitoring/scripts/create-monitor-u
 AWS_PROFILE=springbok ./environment/services/monitoring/scripts/put-dashboard.sh stage
 ```
 
-What the stack (`cell-kn-<env>-monitoring`,
+What the stack (`nlm-ckn-<env>-monitoring`,
 [monitoring.yaml](../environment/services/monitoring/cloudformation/monitoring.yaml)) deploys:
 
 - **MetricsScraper** (in-VPC Lambda) — scrapes ArangoDB `/_admin/metrics/v2`
-  on `arangodb.cell-kn-<env>.local:8529` and pushes leading-signal RocksDB
+  on `arangodb.nlm-ckn-<env>.local:8529` and pushes leading-signal RocksDB
   series to CloudWatch `CellKN/ArangoDB`
   (`rocksdb_cache_hit_rate_recent`, `rocksdb_block_cache_usage`/`_capacity`,
   `arangodb_search_columns_cache_size`). A sustained drop in recent hit rate is
   the early "cold/slow DB" warning. Authenticates as the read-only `monitor`
   user (password in Secrets Manager at
-  `/cell-kn/<env>/secrets/arangodb-monitor-password`).
+  `/nlm-ckn/<env>/secrets/arangodb-monitor-password`).
 - **WedgeDetector** (Lambda) — every minute flags the outage signature: SSM
   `PingStatus = ConnectionLost` **while** EC2 status checks are `ok/ok`. Emits
   `CellKN/Monitoring` metrics + an SNS alert. Auto-remediation
@@ -134,12 +134,12 @@ What the stack (`cell-kn-<env>-monitoring`,
   `…-alb-response-time-high` (target response time p90 sustained); both
   overridable via `Alb5xxAlarmThreshold` / `AlbResponseTimeAlarmThreshold`. The
   ALB dimension is stable across deploys, so these don't need re-pointing — the
-  deploy script resolves it from the `cell-kn-<env>-alb` load balancer (skipped
+  deploy script resolves it from the `nlm-ckn-<env>-alb` load balancer (skipped
   if there's no ALB).
-- **Shared alert topic** (`cell-kn-<env>-alerts`) — the environment's
+- **Shared alert topic** (`nlm-ckn-<env>-alerts`) — the environment's
   general-purpose reporting topic, not wedge-only. Both alarms above publish to
   it, and other stacks can route their own alarms here by importing
-  `cell-kn-<env>-monitoring-alert-topic-arn` and adding it to their
+  `nlm-ckn-<env>-monitoring-alert-topic-arn` and adding it to their
   `AlarmActions`. Its topic policy authorises CloudWatch and EventBridge in the
   account to publish, e.g.:
 

@@ -4,7 +4,7 @@ Description: 'Bootstrap infrastructure for Cell-KN - S3 for templates, OIDC prov
 Parameters:
   ProjectName:
     Type: String
-    Default: cell-kn
+    Default: nlm-ckn
     Description: Project name for resource naming
 
   GitHubOrg:

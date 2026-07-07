@@ -34,11 +34,11 @@ All ECS roles use a trust policy for `ecs-tasks.amazonaws.com`. The Lambda role 
 
 | Role Name | Used By | Trust Policy | Required Permissions |
 |-----------|---------|--------------|----------------------|
-| `cell-kn-<env>-arangodb-exec` | `arangodb.yaml` ECS task execution | `ecs-tasks.amazonaws.com` | AWS managed: `AmazonECSTaskExecutionRolePolicy`; inline: `ssm:GetParameter`, `ssm:GetParameters` on `arn:aws:ssm:*:*:parameter/cell-kn/<env>/*` |
-| `cell-kn-<env>-arangodb-task` | `arangodb.yaml` ArangoDB EC2 instance runtime | `ec2.amazonaws.com` | `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on the ArangoDB data bucket; `ssm:GetParameter` on `arn:aws:ssm:*:*:parameter/cell-kn/<env>/arango/*` and `cell-kn/shared/arangodb-bucket-name`; `secretsmanager:GetSecretValue` on `arn:aws:secretsmanager:*:*:secret:/cell-kn/<env>/secrets/*` |
-| `cell-kn-<env>-backend-exec` | `backend.yaml` ECS task execution | `ecs-tasks.amazonaws.com` | AWS managed: `AmazonECSTaskExecutionRolePolicy`; inline: `ssm:GetParameter`, `ssm:GetParameters` on `arn:aws:ssm:*:*:parameter/cell-kn/<env>/*`; `secretsmanager:GetSecretValue` on `arn:aws:secretsmanager:*:*:secret:/cell-kn/<env>/secrets/*` |
-| `cell-kn-<env>-backend-task` | `backend.yaml` backend container runtime | `ecs-tasks.amazonaws.com` | No additional permissions required |
-| `cell-kn-<env>-random-secret-fn` | `secrets.yaml` Lambda for secret generation | `lambda.amazonaws.com` | AWS managed: `AWSLambdaBasicExecutionRole` |
+| `nlm-ckn-<env>-arangodb-exec` | `arangodb.yaml` ECS task execution | `ecs-tasks.amazonaws.com` | AWS managed: `AmazonECSTaskExecutionRolePolicy`; inline: `ssm:GetParameter`, `ssm:GetParameters` on `arn:aws:ssm:*:*:parameter/nlm-ckn/<env>/*` |
+| `nlm-ckn-<env>-arangodb-task` | `arangodb.yaml` ArangoDB EC2 instance runtime | `ec2.amazonaws.com` | `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on the ArangoDB data bucket; `ssm:GetParameter` on `arn:aws:ssm:*:*:parameter/nlm-ckn/<env>/arango/*` and `nlm-ckn/shared/arangodb-bucket-name`; `secretsmanager:GetSecretValue` on `arn:aws:secretsmanager:*:*:secret:/nlm-ckn/<env>/secrets/*` |
+| `nlm-ckn-<env>-backend-exec` | `backend.yaml` ECS task execution | `ecs-tasks.amazonaws.com` | AWS managed: `AmazonECSTaskExecutionRolePolicy`; inline: `ssm:GetParameter`, `ssm:GetParameters` on `arn:aws:ssm:*:*:parameter/nlm-ckn/<env>/*`; `secretsmanager:GetSecretValue` on `arn:aws:secretsmanager:*:*:secret:/nlm-ckn/<env>/secrets/*` |
+| `nlm-ckn-<env>-backend-task` | `backend.yaml` backend container runtime | `ecs-tasks.amazonaws.com` | No additional permissions required |
+| `nlm-ckn-<env>-random-secret-fn` | `secrets.yaml` Lambda for secret generation | `lambda.amazonaws.com` | AWS managed: `AWSLambdaBasicExecutionRole` |
 
 > Replace `<env>` with `sandbox` or `prod`.
 
@@ -48,10 +48,10 @@ All security groups must be created in the NIH-provided VPC. Replace `<VPC_CIDR>
 
 | Name | Inbound Rules | Outbound |
 |------|---------------|----------|
-| `cell-kn-<env>-alb-sg` | TCP 80 from `0.0.0.0/0`; TCP 443 from `0.0.0.0/0`; TCP 8000 from `<VPC_CIDR>`; TCP 8529 from `<VPC_CIDR>` | All traffic |
-| `cell-kn-<env>-backend-sg` | TCP 8000 from `<VPC_CIDR>` | All traffic |
-| `cell-kn-<env>-arangodb-sg` | TCP 8529 from `<VPC_CIDR>` | All traffic |
-| `cell-kn-<env>-efs-sg` | TCP 2049 (NFS) from `<VPC_CIDR>` | All traffic |
+| `nlm-ckn-<env>-alb-sg` | TCP 80 from `0.0.0.0/0`; TCP 443 from `0.0.0.0/0`; TCP 8000 from `<VPC_CIDR>`; TCP 8529 from `<VPC_CIDR>` | All traffic |
+| `nlm-ckn-<env>-backend-sg` | TCP 8000 from `<VPC_CIDR>` | All traffic |
+| `nlm-ckn-<env>-arangodb-sg` | TCP 8529 from `<VPC_CIDR>` | All traffic |
+| `nlm-ckn-<env>-efs-sg` | TCP 2049 (NFS) from `<VPC_CIDR>` | All traffic |
 
 > In `dev`, the ALB security group opens ports 8000 and 8529 publicly (`0.0.0.0/0`) for direct access. The `sandbox`/`prod` rules above intentionally restrict these to VPC CIDR only.
 
@@ -63,7 +63,7 @@ Populate the following SSM parameters in the NIH account **before** running `dep
 
 ```bash
 ENV=sandbox   # or prod
-PROJECT=cell-kn
+PROJECT=nlm-ckn
 
 # Security group IDs (from the groups created above)
 aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/sg-alb"      --value "sg-xxxxxxxxxx" --type String
@@ -72,11 +72,11 @@ aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/sg-arangodb"  --value "
 aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/sg-efs"       --value "sg-xxxxxxxxxx" --type String
 
 # IAM role ARNs (from the roles created above)
-aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-arangodb-exec-arn"    --value "arn:aws:iam::ACCOUNT:role/cell-kn-${ENV}-arangodb-exec"    --type String
-aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-arangodb-task-arn"    --value "arn:aws:iam::ACCOUNT:role/cell-kn-${ENV}-arangodb-task"    --type String
-aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-backend-exec-arn"     --value "arn:aws:iam::ACCOUNT:role/cell-kn-${ENV}-backend-exec"     --type String
-aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-backend-task-arn"     --value "arn:aws:iam::ACCOUNT:role/cell-kn-${ENV}-backend-task"     --type String
-aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-random-secret-fn-arn" --value "arn:aws:iam::ACCOUNT:role/cell-kn-${ENV}-random-secret-fn" --type String
+aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-arangodb-exec-arn"    --value "arn:aws:iam::ACCOUNT:role/nlm-ckn-${ENV}-arangodb-exec"    --type String
+aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-arangodb-task-arn"    --value "arn:aws:iam::ACCOUNT:role/nlm-ckn-${ENV}-arangodb-task"    --type String
+aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-backend-exec-arn"     --value "arn:aws:iam::ACCOUNT:role/nlm-ckn-${ENV}-backend-exec"     --type String
+aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-backend-task-arn"     --value "arn:aws:iam::ACCOUNT:role/nlm-ckn-${ENV}-backend-task"     --type String
+aws ssm put-parameter --name "/${PROJECT}/${ENV}/prereqs/iam-random-secret-fn-arn" --value "arn:aws:iam::ACCOUNT:role/nlm-ckn-${ENV}-random-secret-fn" --type String
 ```
 
 Once all 9 parameters exist, `deploy/02-deploy-environment.sh sandbox` (or `prod`) will proceed without attempting to create any IAM or security group resources.
@@ -186,32 +186,32 @@ To load an ArangoDB dataset from S3:
 ```bash
 # Check stack status
 aws cloudformation describe-stacks \
-  --stack-name cell-kn-dev \
+  --stack-name nlm-ckn-dev \
   --query 'Stacks[0].StackStatus'
 
 # Get service URLs
 aws cloudformation describe-stacks \
-  --stack-name cell-kn-dev \
+  --stack-name nlm-ckn-dev \
   --query 'Stacks[0].Outputs[?OutputKey==`FrontendUrl` || OutputKey==`BackendUrl` || OutputKey==`AlbDnsName`].[OutputKey,OutputValue]' \
   --output table
 
 # Test backend health
 ALB=$(aws cloudformation describe-stacks \
-  --stack-name cell-kn-dev \
+  --stack-name nlm-ckn-dev \
   --query 'Stacks[0].Outputs[?OutputKey==`AlbDnsName`].OutputValue' \
   --output text)
 curl http://$ALB:8000/health
 
 # Check ECS service status
 aws ecs describe-services \
-  --cluster cell-kn-dev-cluster \
-  --services cell-kn-dev-backend cell-kn-dev-arangodb \
+  --cluster nlm-ckn-dev-cluster \
+  --services nlm-ckn-dev-backend nlm-ckn-dev-arangodb \
   --query 'services[*].{Name:serviceName,Status:status,Desired:desiredCount,Running:runningCount}' \
   --output table
 
 # Verify security groups (dev)
 aws ec2 describe-security-groups \
-  --filters "Name=tag:Project,Values=cell-kn" "Name=tag:Environment,Values=dev" \
+  --filters "Name=tag:Project,Values=nlm-ckn" "Name=tag:Environment,Values=dev" \
   --query 'SecurityGroups[*].[GroupId,GroupName]' \
   --output table
 ```
