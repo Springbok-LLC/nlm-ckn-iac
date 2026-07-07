@@ -25,7 +25,13 @@
 #   NCBI_API_KEY_SECRET_ARN   Secrets Manager ARN from the fetch stack output
 #
 # The S3 bucket is no longer a required value here — batch.yaml resolves it
-# live from SSM (see the S3Bucket parameter in that template).
+# live from SSM (see the S3Bucket parameter in that template). This script
+# always passes S3Bucket explicitly (rather than relying on
+# UsePreviousValue/Default) because the nlm-ckn rename cutover
+# (docs/cutover-to-nlm-ckn.md) hasn't completed: /nlm-ckn/shared/arangodb-bucket-name
+# doesn't exist yet, so the template Default would fail. Once deploy/01-deploy-account-setup.sh
+# has been rerun and the new SSM parameter exists, set S3_BUCKET_SSM_PARAM to
+# switch over.
 #
 # Optional env vars:
 #   GITHUB_TOKEN         GitHub token for deployment status updates. When set,
@@ -40,6 +46,9 @@
 #   INSTANCE_TYPES       Comma-separated EC2 types (default: r5.4xlarge,r5.2xlarge)
 #   MAX_VCPUS            Max vCPUs for the compute environment (default: 16)
 #   EBS_VOLUME_GIB       Root EBS volume size in GiB (default: 200)
+#   S3_BUCKET_SSM_PARAM  SSM parameter name holding the dataset bucket
+#                        (default: /cell-kn/shared/arangodb-bucket-name — the
+#                        pre-cutover name; see docs/cutover-to-nlm-ckn.md)
 #
 # Usage:
 #   bash deploy/03-deploy-batch.sh
@@ -63,6 +72,7 @@ FETCH_STACK_NAME="${FETCH_STACK_NAME:-nlm-ckn-etl-fetch}"
 INSTANCE_TYPES="${INSTANCE_TYPES:-r5.4xlarge,r5.2xlarge}"
 MAX_VCPUS="${MAX_VCPUS:-16}"
 EBS_VOLUME_GIB="${EBS_VOLUME_GIB:-200}"
+S3_BUCKET_SSM_PARAM="${S3_BUCKET_SSM_PARAM:-/cell-kn/shared/arangodb-bucket-name}"
 
 # ── Validate required env vars ────────────────────────────────────────────────
 missing=()
@@ -174,6 +184,7 @@ aws cloudformation deploy \
   --capabilities  CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --parameter-overrides \
+    S3Bucket="${S3_BUCKET_SSM_PARAM}" \
     EcrImageUri="${PIPELINE_REPO_URI}:latest" \
     NcbiApiKeySecretArn="${NCBI_API_KEY_SECRET_ARN}" \
     GithubTokenSecretArn="${GITHUB_TOKEN_SECRET_ARN}" \

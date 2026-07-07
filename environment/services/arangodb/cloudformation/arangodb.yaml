@@ -374,15 +374,13 @@ Resources:
     DependsOn:
       - ArangoDbUserParameter
       - DatasetVersionParameter
-      - LogGroup
-      - ServiceDiscoveryService
     CreationPolicy:
       ResourceSignal:
         Timeout: PT20M
     Properties:
       # arm64 AMI — matches t4g (Graviton2) instance family.
       # If switching back to t3/x86, change to: al2023-ami-kernel-default-x86_64
-      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
       InstanceType: !FindInMap [EnvironmentSizing, !Ref Environment, InstanceType]
       SubnetId: !Ref ArangoDbSubnetId
       SecurityGroupIds:

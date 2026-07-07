@@ -45,11 +45,6 @@ Parameters:
     Description: Route 53 hosted zone ID
 
   # Optional Parameters
-  ArangoDbUser:
-    Type: String
-    Default: root
-    Description: ArangoDB username
-
   PrivateSubnetCount:
     Type: Number
     Default: 2
@@ -84,7 +79,6 @@ Metadata:
       - Label:
           default: Optional Configuration
         Parameters:
-          - ArangoDbUser
           - PrivateSubnetCount
           - TemplatesBucketName
 

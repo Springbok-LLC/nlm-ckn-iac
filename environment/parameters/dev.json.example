@@ -32,10 +32,6 @@
     "ParameterValue": "Z018047920VCMG6465Q74"
   },
   {
-    "ParameterKey": "ArangoDbUser",
-    "ParameterValue": "root"
-  },
-  {
     "ParameterKey": "PrivateSubnetCount",
     "ParameterValue": "2"
   }

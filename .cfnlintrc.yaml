@@ -7,5 +7,11 @@
 # conditionally resolved to a real ARN in sandbox/prod via !If.
 # cfn-lint cannot evaluate !If conditions at lint time so it flags the
 # empty-string Default as non-matching against the ARN property schema.
+#
+# Suppress W6001 for outputs that build a computed value (e.g. a URL) out of
+# a cross-stack ImportValue rather than re-exporting it verbatim. cfn-lint
+# flags any ImportValue reachable from an Output as a pointless re-export,
+# even when it's just one input to a larger Fn::Sub.
 ignore_checks:
   - W1030
+  - W6001

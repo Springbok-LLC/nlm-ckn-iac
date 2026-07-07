@@ -23,7 +23,13 @@
 #   SUBNET_IDS     Comma-separated private subnet IDs (e.g. subnet-aaa,subnet-bbb)
 #
 # The S3 bucket is no longer a required value here — fetch.yaml resolves it
-# live from SSM (see the S3Bucket parameter in that template).
+# live from SSM (see the S3Bucket parameter in that template). This script
+# always passes S3Bucket explicitly (rather than relying on
+# UsePreviousValue/Default) because the nlm-ckn rename cutover
+# (docs/cutover-to-nlm-ckn.md) hasn't completed: /nlm-ckn/shared/arangodb-bucket-name
+# doesn't exist yet, so the template Default would fail. Once deploy/01-deploy-account-setup.sh
+# has been rerun and the new SSM parameter exists, set S3_BUCKET_SSM_PARAM to
+# switch over.
 #
 # Optional env vars:
 #   AWS_REGION           AWS region (default: from AWS CLI config)
@@ -34,6 +40,9 @@
 #   CKN_RUN              Run name passed to fetch.py (default: latest)
 #   TASK_CPU             Fargate vCPU units (default: 2048)
 #   TASK_MEMORY_MIB      Fargate memory in MiB (default: 8192)
+#   S3_BUCKET_SSM_PARAM  SSM parameter name holding the dataset bucket
+#                        (default: /cell-kn/shared/arangodb-bucket-name — the
+#                        pre-cutover name; see docs/cutover-to-nlm-ckn.md)
 #
 # Usage:
 #   bash deploy/02-deploy-fetch.sh
@@ -58,6 +67,7 @@ SCHEDULE_EXPRESSION="${SCHEDULE_EXPRESSION:-cron(0 2 * * ? *)}"
 CKN_RUN="${CKN_RUN:-latest}"
 TASK_CPU="${TASK_CPU:-2048}"
 TASK_MEMORY_MIB="${TASK_MEMORY_MIB:-8192}"
+S3_BUCKET_SSM_PARAM="${S3_BUCKET_SSM_PARAM:-/cell-kn/shared/arangodb-bucket-name}"
 
 # ── Validate required env vars ───────────────────────────────────────────────
 missing=()
@@ -130,6 +140,7 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --parameter-overrides \
+    S3Bucket="${S3_BUCKET_SSM_PARAM}" \
     EcrImageUri="${FETCHER_REPO_URI}:latest" \
     NcbiEmail="${NCBI_EMAIL}" \
     NcbiApiKey="${NCBI_API_KEY}" \
