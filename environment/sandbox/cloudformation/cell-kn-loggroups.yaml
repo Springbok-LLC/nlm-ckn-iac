@@ -1,0 +1,20 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Create CloudWatch log group for ArangoDB.'
+
+Resources:
+  # ============================================================================
+  # DB CloudWatch Log Group
+  # ============================================================================
+  DBLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/arango/instance/cell-kn-db-sbox/arangodb'
+      RetentionInDays: 30
+  # ============================================================================
+  # EC2 CloudWatch Log Group
+  # ============================================================================
+  EC2LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub 'NLM-SBOX-${AWS::Region}-CELL-KN-app-logs'
+      RetentionInDays: 30

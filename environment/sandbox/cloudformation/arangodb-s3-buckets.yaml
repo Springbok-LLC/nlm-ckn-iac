@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Bootstrap infrastructure for Cell-KN - S3 for templates, OIDC provider, and IAM roles'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cell-kn
+    Description: Project name for resource naming
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Configuration
+        Parameters:
+          - ProjectName
+
+Resources:
+  # ============================================================================
+  # S3 Bucket for CloudFormation Templates
+  # ============================================================================
+  TemplatesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ProjectName}-cfn-templates-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub '${ProjectName}-cfn-templates-${AWS::AccountId}'
+        - Key: Purpose
+          Value: CloudFormation template storage
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ============================================================================
+  # S3 Bucket for Stack Outputs and State
+  # ============================================================================
+  # This replaces Terraform state - used to store stack outputs and deployment metadata
+  StateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ProjectName}-cfn-state-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub '${ProjectName}-cfn-state-${AWS::AccountId}'
+        - Key: Purpose
+          Value: CloudFormation state and outputs
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  TemplatesBucketName:
+    Description: S3 bucket for CloudFormation templates
+    Value: !Ref TemplatesBucket
+    Export:
+      Name: !Sub '${ProjectName}-templates-bucket'
+
+  StateBucketName:
+    Description: S3 bucket for stack outputs and state
+    Value: !Ref StateBucket
+    Export:
+      Name: !Sub '${ProjectName}-state-bucket'
+
+  DeploymentInstructions:
+    Description: Next steps for deployment
+    Value: !Sub |
+      Bootstrap complete! Next steps:
+      1. Configure GitHub Actions to use role: GitHubActionsRole.Arn.
+      2. Deploy an environment: ./scripts/deploy-environment.sh dev
+      See cloudformation/DEPLOYMENT.md for full details.
+

@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Set up notification topics for application
+
+# Metadata:
+
+Parameters:
+  pAWSAccount:
+    Description: 'Account (NLM-PROD, NLM-QA, NLM-INT, NLM-SEC)'
+    Type: String
+    Default: "NLM-SBOX"
+  pAWSAccountLC:
+    Description: 'Account (NLM-PROD, NLM-QA, NLM-INT, NLM-SEC)'
+    Type: String
+    Default: "nlm-sbox"
+  pVPCName:
+    Description: Parent VPC shortname e.g. prod1
+    Type: String
+    Default: "vpc-101"
+  pAppName:
+    Description: App Name
+    Type: String
+    Default: "CELL-KN"
+  pNotificationTopicApplicationStatusName:
+    Description: Topic Name for app errors.  It will be contactenated with the App Name
+    Type: String
+    Default: "application-status-topic"
+  pNotificationTopicApplicationExportName:
+    Description: Export name for topic
+    Type: String
+    Default: "notification-topic"
+  pApplicationStatusGroupEmail:
+    Description: Group email address to send application status messages
+    Type: String
+    Default: "NLMOCCSDevOps@mail.nih.gov"
+  pAttachDMSPolicy:
+    Description: Attach DMS "allow publish" resource policy
+    Type: String
+    Default: "no"
+Conditions:
+  cAttachDMSPolicy: !Equals
+    - !Ref pAttachDMSPolicy
+    - "attach"
+Resources:
+  # Logging - now included in the instances through the Launch Configuration.
+  # --- Notifications
+  # Create SNS topics.  Each is used for a slightly different purpose.
+  rNotificationTopicApplicationStatus:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      TopicName: !Sub ${pAWSAccount}-${pAppName}-${pNotificationTopicApplicationStatusName}
+      DisplayName: !Sub ${pAWSAccount}-${pAppName}-${pNotificationTopicApplicationStatusName}
+      # email address here for testing.  Could also be used to automatically subscribe certain groups
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref pApplicationStatusGroupEmail
+      # --- The policy to allow instances to send to this topic is in the IAM instance policies.
+  rDMSAllowPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Condition: cAttachDMSPolicy
+    Properties:
+      PolicyDocument:
+        Id: "__default_policy_ID"
+        Version: '2012-10-17'
+        Statement:
+          - Sid: "__default_statement_ID"
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+                - SNS:GetTopicAttributes
+                - SNS:SetTopicAttributes
+                - SNS:AddPermission
+                - SNS:RemovePermission
+                - SNS:DeleteTopic
+                - SNS:Subscribe
+                - SNS:ListSubscriptionsByTopic
+                - SNS:Publish
+                - SNS:Receive
+            Resource: !Ref rNotificationTopicApplicationStatus
+            Condition:
+              StringEquals:
+                AWS:SourceOwner: !Ref AWS::AccountId
+          - Sid: dms-allow-publish
+            Effect: Allow
+            Principal:
+              Service:
+                - "dms.amazonaws.com"
+            Action:
+              - sns:Publish
+            Resource: !Ref rNotificationTopicApplicationStatus
+      Topics:
+        - !Ref rNotificationTopicApplicationStatus
+Outputs:
+  rNotificationTopicApplicationStatus:
+    Value: !Ref rNotificationTopicApplicationStatus
+    Export:
+      Name: !Sub ${pAWSAccount}-${pVPCName}-${pAppName}-${pNotificationTopicApplicationExportName}

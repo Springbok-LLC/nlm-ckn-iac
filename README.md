@@ -20,11 +20,12 @@ repos.
 
 All deploy scripts live together in `deploy/`, numbered by the order they need
 to run — same number means they don't depend on each other and can run in
-parallel. `environment/` holds everything provisioned once per environment
-(platform tier + service stacks + their parameter files); `manual/` holds
-out-of-band stacks with no deploy wrapper (deployed by hand, rarely). Templates
-and non-deploy operator scripts (tunnels/dashboards) stay organized by
-service/component within those roots.
+parallel. `environment/` holds the per-environment infrastructure — the shared
+platform tier + service stacks (for `dev`/`stage`) plus a self-contained
+`sandbox/` for the NIH sandbox account; `prod` is managed by the NIH team
+outside this repo. `manual/` holds out-of-band stacks with no deploy wrapper
+(deployed by hand, rarely). Templates and non-deploy operator scripts
+(tunnels/dashboards) stay organized by service/component within those roots.
 
 ```
 nlm-ckn-iac/
@@ -38,18 +39,20 @@ nlm-ckn-iac/
 │   └── cloudformation/bootstrap.yaml
 ├── shared/              # Cross-environment resources: ECR repo, ArangoDB dataset S3 bucket
 │   └── cloudformation/shared-resources.yaml
-├── environment/          # Everything provisioned once per environment (dev/stage/sandbox/prod)
+├── environment/          # Per-environment infra: dev/stage here; sandbox separate; prod is NIH-managed
 │   ├── parameters/{dev,stage,stage-vpc}.json
-│   ├── platform/         # Per-environment infra tier (secrets, security groups, ECS cluster,
-│   │                     # Cloud Map, ALB) plus the main.yaml orchestrator
+│   ├── platform/         # Shared dev/stage infra tier (secrets, security groups,
+│   │                     # ECS cluster, Cloud Map, ALB) plus the main.yaml orchestrator
 │   │   └── cloudformation/{main,secrets,security-groups,ecs-cluster,service-discovery,alb}.yaml
-│   └── services/
-│       ├── frontend/cloudformation/frontend.yaml       # S3 + CloudFront + ACM
-│       ├── backend/cloudformation/backend.yaml         # ECS service, auto-scaling
-│       ├── arangodb/cloudformation/arangodb.yaml       # EC2 + EBS instance
-│       └── monitoring/                                 # Wedge-detection / CloudWatch alarms
-│           ├── cloudformation/monitoring.yaml
-│           └── scripts/{create-monitor-user,put-dashboard}.sh
+│   ├── services/                                       # Shared dev/stage service stacks
+│   │   ├── frontend/cloudformation/frontend.yaml       # S3 + CloudFront + ACM
+│   │   ├── backend/cloudformation/backend.yaml         # ECS service, auto-scaling
+│   │   ├── arangodb/cloudformation/arangodb.yaml       # EC2 + EBS instance
+│   │   └── monitoring/                                 # Wedge-detection / CloudWatch alarms
+│   │       ├── cloudformation/monitoring.yaml
+│   │       └── scripts/{create-monitor-user,put-dashboard}.sh
+│   └── sandbox/          # NIH sandbox account: separate, self-contained CFN, deployed on its own
+│       └── cloudformation/                             # (prod infra is managed by NIH, outside this repo)
 ├── etl/                 # From nlm-ckn-etl: ECR, NCBI fetch, and Batch release stacks
 │   └── cloudformation/{ecr,fetch,batch,github-oidc}.yaml
 ├── manual/               # Out-of-band stacks, deployed by hand, no deploy/ wrapper

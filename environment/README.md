@@ -1,10 +1,18 @@
 # Environment
 
-Everything provisioned **once per environment** (`dev` / `stage` / `sandbox` /
-`prod`) to run the NLM-CKN application: a shared **platform tier** (secrets,
+Everything provisioned to run the NLM-CKN application. **`dev`** and **`stage`**
+are owned end-to-end by this repo: they share a **platform tier** (secrets,
 security groups, ECS cluster, Cloud Map, ALB) plus the **service stacks** that
-run on top of it (frontend, backend, ArangoDB, monitoring). Parameter files for
-each environment live in [`parameters/`](parameters/).
+run on top of it (frontend, backend, ArangoDB, monitoring), parameterized per
+environment; parameter files live in [`parameters/`](parameters/).
+
+The two NIH-account environments are handled outside this shared tier:
+
+- **`sandbox`** has its own self-contained CloudFormation under
+  [`sandbox/`](sandbox/) and is deployed separately (see
+  [Sandbox](#sandbox-sandbox) below).
+- **`prod`** infrastructure is managed by the NIH team outside this repo — no
+  prod templates live here.
 
 This is the running-application infrastructure. The ArangoDB **dataset** it
 serves is produced separately by the [`etl/`](../etl/README.md) release
@@ -86,14 +94,16 @@ dependency order:
 | Stack | Provisions |
 |-------|------------|
 | `secrets.yaml` | Random secrets for Django, ArangoDB, and the CloudFront origin header (stable across updates, never auto-rotated). |
-| `security-groups.yaml` | ALB / backend / ArangoDB security groups. **dev only** — in sandbox/prod the SG IDs are pre-created by NIH and read from SSM. |
+| `security-groups.yaml` | ALB / backend / ArangoDB security groups. Created for **dev/stage** (the environments this repo owns end-to-end). |
 | `ecs-cluster.yaml` | The ECS cluster the backend service runs in. |
 | `service-discovery.yaml` | Cloud Map private DNS namespace for backend → ArangoDB resolution. |
 | `alb.yaml` | ALB, ACM cert (shared by both HTTPS listeners and CloudFront), backend (`:8000`) and ArangoDB (`:8529`) target groups, and the origin-header enforcement rules. |
 
-In **sandbox/prod**, several prerequisites (IAM roles, security groups) are
-NIH-provided and read from SSM under `/${ProjectName}/${Environment}/prereqs/*`
-rather than created here; deployment fails fast if those parameters are missing.
+This tier is deployed only for **dev/stage**. The templates still carry an
+`IsSelfManaged=false` path that reads IAM roles and security groups from SSM
+prereqs (`/${ProjectName}/${Environment}/prereqs/*`) — a leftover from when this
+repo also targeted the NIH accounts. That path is now unused: `sandbox` has its
+own templates (below) and `prod` is managed by NIH outside this repo.
 
 ### Service stacks (`services/`)
 
@@ -104,15 +114,28 @@ rather than created here; deployment fails fast if those parameters are missing.
 | ArangoDB | `arangodb/cloudformation/arangodb.yaml` | EC2 instance + EBS volume, Cloud Map service registration, S3 restore on boot. |
 | Monitoring | `monitoring/cloudformation/monitoring.yaml` | CloudWatch alarms, wedge-detection Lambdas, SNS notifications, KMS key. Optional. |
 
+### Sandbox (`sandbox/`)
+
+The NIH `sandbox` account has constraints that the shared `platform/` +
+`services/` templates can't satisfy, so its infrastructure is defined by
+separate, self-contained CloudFormation under
+[`sandbox/cloudformation/`](sandbox/cloudformation/) and deployed on its own
+rather than through `platform/main.yaml`. It does **not** consume the platform
+tier or the per-environment SSM prereqs described above.
+
 ## Deployment
 
 Provisioned in **Wave 2** (platform tier, then the frontend/arangodb/backend
 service stacks) with **monitoring** following in **Wave 3**:
 
 ```bash
-./deploy/02-deploy-environment.sh <env>    # platform tier + frontend/arangodb/backend
+./deploy/02-deploy-environment.sh <env>    # dev/stage: platform tier + frontend/arangodb/backend
 ./deploy/03-deploy-monitoring.sh <env>     # optional, needs the environment stack
 ```
+
+The `sandbox/` stacks are deployed separately with their own CloudFormation, and
+`prod` is deployed by the NIH team outside this repo — neither is driven by
+`02-deploy-environment.sh`.
 
 Application code and data are shipped onto this infrastructure separately from
 the [`nlm-ckn-ui`](https://github.com/Springbok-LLC/nlm-ckn-ui) repo

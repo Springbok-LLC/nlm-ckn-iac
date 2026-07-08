@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create SSM parameters for CELL KN application
+
+# Metadata:
+
+Parameters:
+  pSSMAppsRootPath:
+      Description: App Name
+      Type: String
+      Default: platform
+  pAppName:
+      Description: App Name
+      Type: String
+      Default:  Cell-KN
+  pAppNameLC:
+      Description: App Name
+      Type: String
+      Default: cell-kn
+  pVPCLC:
+      Description: VPC Name in lower case
+      Type: String
+      Default: vpc-101
+  pDBUserID:
+      Description:  ArangoDB user ID, like root
+      Type: String
+      Default: "root"
+  pDatasetVersion:
+      Description: "Dataset version parameter - managed out-of-band by deploy-dataset.sh. Always set to 'none' here so CloudFormation never overwrites a live value. The deploy-dataset.sh script will update this parameter to the correct version after deployment."
+      Type: String
+      Default: "none"
+  pNessusGroupName:
+      Description: Nessus Group name to be used for the App server
+      Type: String
+      Default: AWS_NLM-SBOX-CELL-KN
+  pEcrUrl:
+      Description: Ecrt URL for CELL-KN application
+      Type: String
+      Default: "206537881715.dkr.ecr.us-east-1.amazonaws.com/cell-kn-project:cell-kn-backend"
+  pDefaultEBSRootVolumeSize:
+      Description: Root volume size for app
+      Type: String
+      Default: 30
+  pMaxAppServersSize:
+      Description: Max App server size to be used for the App server ASG
+      Type: String
+      Default: 2
+  pArangodbBucketName:
+      Description: Ancible version used by application
+      Type: String
+      Default: "cell-kn-arangodb-data-206537881715"
+  pSecretArn:
+      Description: Secret manager RDS DB arn for application
+      Type: String
+      Default: "arn:aws:secretsmanager:us-east-1:070163433501:secret:/dbsecrets/rxnprod2020aav2_prod@rxnorm-db-prod-TjJJK2"
+Resources:
+  rArangodbBucketName:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub /${pSSMAppsRootPath}/${pAppNameLC}/arango/pArangodbBucketName
+      Type: "String"
+      Value: !Sub ${pArangodbBucketName}
+      Description: "Dataset version parameter "
+  rDBUserID:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub /${pSSMAppsRootPath}/${pAppNameLC}/arango/pDBUserID
+      Type: "String"
+      Value: !Sub ${pDBUserID}
+      Description: "DB user ID for  CELL-KN ArangoDB, like root"
+  rDatasetVersion:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub /${pSSMAppsRootPath}/${pAppNameLC}/arango/pDatasetVersion
+      Type: "String"
+      Value: !Sub ${pDatasetVersion}
+      Description: "Dataset version parameter "
+  rEcrUrl:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub /${pSSMAppsRootPath}/${pAppNameLC}/shared/pEcrUrl
+      Type: "String"
+      Value: !Sub ${pEcrUrl}
+      Description: "Ecr URL for CELL-KN application"
+

@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Generates IAM Roles'
+
+Parameters:
+  pAWSAccount:
+    Description: Account (NLM-PROD, NLM-QA, NLM-INT, NLM-SEC)
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /standard/pAwsAccount
+  pAppNameLC:
+    Description: Application Name (lowercase)
+    Type: String
+    Default: "secrete-lambda"
+  pProjectName:
+    Type: String
+    Default: cell-kn
+    Description: Project name for resource naming
+  pEnvironment:
+    Type: String
+    Default: sandbox
+    Description: Environment name (dev, sandbox, prod)
+    AllowedValues:
+      - dev
+      - sandbox
+      - prod
+
+Resources:
+  # ============================================================================
+  # IAM Role for Admins
+  # ============================================================================
+  rAdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${pAWSAccount}-${pAppNameLC}-role"
+      Description: NLM AWS Administrators
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Tags:
+        - Key: Project
+          Value: !Ref pProjectName
+        - Key: Environment
+          Value: !Ref pEnvironment
+        - Key: ManagedBy
+          Value: CloudFormation
+
