@@ -135,6 +135,12 @@ Resources:
           Value: redirect-to-stage
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Project
+          Value: nlm-ckn
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Route 53 A (alias) records -> CloudFront

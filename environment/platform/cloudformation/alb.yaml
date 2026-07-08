@@ -90,6 +90,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-alb-cert'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # S3 Bucket for ALB Access Logs
@@ -123,6 +127,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-alb-logs-${AWS::AccountId}'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   AlbLogsBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -166,6 +174,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-alb'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Target Groups
@@ -196,6 +208,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-backend-tg'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   ArangoDbTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -223,6 +239,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-arangodb-tg'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # ALB Listeners

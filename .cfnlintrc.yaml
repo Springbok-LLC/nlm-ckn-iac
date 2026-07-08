@@ -15,3 +15,8 @@
 ignore_checks:
   - W1030
   - W6001
+
+# Custom rules (see .cfn-lint-rules/). E9101 enforces the ADR 0004 standard
+# tag set (Project/Owner/ManagedBy/Repository) on every taggable resource.
+append_rules:
+  - .cfn-lint-rules

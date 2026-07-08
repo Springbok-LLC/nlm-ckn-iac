@@ -135,6 +135,8 @@ Resources:
         Environment: !Ref Environment
         Name: !Sub '${ProjectName}-${Environment}-arango-user'
         ManagedBy: CloudFormation
+        Owner: springbok
+        Repository: nlm-ckn-iac
 
   # Dataset version parameter - managed out-of-band by deploy-dataset.sh.
   # Always set to 'none' here so CloudFormation never overwrites a live value
@@ -151,6 +153,8 @@ Resources:
         Environment: !Ref Environment
         Name: !Sub '${ProjectName}-${Environment}-dataset-version'
         ManagedBy: CloudFormation
+        Owner: springbok
+        Repository: nlm-ckn-iac
 
   # ============================================================================
   # CloudWatch Log Group
@@ -160,6 +164,17 @@ Resources:
     Properties:
       LogGroupName: !Sub '/ec2/${ProjectName}-${Environment}-arangodb'
       RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: springbok
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # IAM Role + Instance Profile (dev and stage)
@@ -296,6 +311,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-arangodb-ec2-role'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -353,6 +372,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-arangodb-data'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # EC2 Instance
@@ -810,6 +833,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-arangodb'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
 # NOTE: the standalone DataVolume is attached by the instance itself from
 # UserData (see the "Attach the standalone data volume" block). We deliberately

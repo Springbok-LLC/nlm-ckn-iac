@@ -2,11 +2,28 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   NLM-CKN ECR — two container registries for the NLM-CKN ETL project.
 
-  nlm-ckn-etl-pipeline  — AWS Batch ETL job (Python + JRE; runs pipeline.py)
-  nlm-ckn-etl-fetcher   — ECS Fargate fetch task (Python only; runs fetch-entrypoint)
+  <ProjectName>-etl-pipeline  — AWS Batch ETL job (Python + JRE; runs pipeline.py)
+  <ProjectName>-etl-fetcher   — ECS Fargate fetch task (Python only; runs fetch-entrypoint)
 
   Deploy this stack once, then push both images via CI/CD
   (.github/workflows/build-image.yml) or manually using the PushCommands output.
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+Parameters:
+
+  ProjectName:
+    Type: String
+    Default: nlm-ckn
+    Description: >
+      Project namespace — single source of truth for resource names and the
+      Project tag (ADR 0002). Keep the default in sync with the rest of the repo.
+
+  Owner:
+    Type: String
+    Default: springbok
+    Description: >
+      Owning team or contact, applied as the Owner tag (ADR 0004). Set this to
+      the real owning team/distribution list.
 
 # ── Resources ───────────────────────────────────────────────────────────────
 Resources:
@@ -16,7 +33,7 @@ Resources:
     DeletionPolicy: Retain   # keep images if the stack is deleted
     UpdateReplacePolicy: Retain
     Properties:
-      RepositoryName: nlm-ckn-etl-pipeline
+      RepositoryName: !Sub '${ProjectName}-etl-pipeline'
       ImageScanningConfiguration:
         ScanOnPush: true
       LifecyclePolicy:
@@ -37,14 +54,22 @@ Resources:
           }
       Tags:
         - Key: Project
-          Value: nlm-ckn-etl
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   FetcherImageRepo:
     Type: AWS::ECR::Repository
     DeletionPolicy: Retain   # keep images if the stack is deleted
     UpdateReplacePolicy: Retain
     Properties:
-      RepositoryName: nlm-ckn-etl-fetcher
+      RepositoryName: !Sub '${ProjectName}-etl-fetcher'
       ImageScanningConfiguration:
         ScanOnPush: true
       LifecyclePolicy:
@@ -65,16 +90,24 @@ Resources:
           }
       Tags:
         - Key: Project
-          Value: nlm-ckn-etl
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
 # ── Outputs ─────────────────────────────────────────────────────────────────
 Outputs:
 
   PipelineRepositoryUri:
     Description: >
-      Full ECR URI for the nlm-ckn-etl-pipeline image.
+      Full ECR URI for the pipeline image.
       Passed as EcrImageUri to batch.yaml by deploy.sh.
-    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/nlm-ckn-etl-pipeline"
+    Value: !GetAtt PipelineImageRepo.RepositoryUri
     Export:
       Name: !Sub "${AWS::StackName}-PipelineRepositoryUri"
 
@@ -86,9 +119,9 @@ Outputs:
 
   FetcherRepositoryUri:
     Description: >
-      Full ECR URI for the nlm-ckn-etl-fetcher image.
+      Full ECR URI for the fetcher image.
       Imported by fetch.yaml via Fn::ImportValue.
-    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/nlm-ckn-etl-fetcher"
+    Value: !GetAtt FetcherImageRepo.RepositoryUri
     Export:
       Name: !Sub "${AWS::StackName}-FetcherRepositoryUri"
 
@@ -110,14 +143,14 @@ Outputs:
 
       # Pipeline image (AWS Batch ETL job — includes JRE)
       docker build --platform linux/amd64 --target pipeline \
-        -t ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/nlm-ckn-etl-pipeline:latest \
+        -t ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-etl-pipeline:latest \
         .
       docker push \
-        ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/nlm-ckn-etl-pipeline:latest
+        ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-etl-pipeline:latest
 
       # Fetcher image (ECS Fargate fetch task — no Java)
       docker build --platform linux/amd64 --target fetcher \
-        -t ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/nlm-ckn-etl-fetcher:latest \
+        -t ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-etl-fetcher:latest \
         .
       docker push \
-        ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/nlm-ckn-etl-fetcher:latest
+        ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-etl-fetcher:latest

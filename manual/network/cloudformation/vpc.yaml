@@ -73,6 +73,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Internet Gateway
@@ -89,6 +93,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   InternetGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -117,6 +125,10 @@ Resources:
           Value: public
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   PublicSubnet2:
     Type: AWS::EC2::Subnet
@@ -136,6 +148,10 @@ Resources:
           Value: public
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Private Subnets (for ECS tasks and ArangoDB EC2)
@@ -157,6 +173,10 @@ Resources:
           Value: private
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
@@ -175,6 +195,10 @@ Resources:
           Value: private
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # NAT Gateway (single AZ to reduce cost for Staging)
@@ -194,6 +218,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   NatGateway:
     Type: AWS::EC2::NatGateway
@@ -209,6 +237,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Route Tables
@@ -226,6 +258,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   PublicRoute:
     Type: AWS::EC2::Route
@@ -260,6 +296,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   PrivateRoute:
     Type: AWS::EC2::Route

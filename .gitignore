@@ -11,3 +11,4 @@
 # Local scratch
 *.tar.gz
 *.log
+*.pyc

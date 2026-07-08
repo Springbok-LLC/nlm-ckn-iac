@@ -204,6 +204,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Monitoring security group + ingress to ArangoDB:8529
@@ -228,6 +232,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-monitoring-sg'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # One ingress rule on the ArangoDB SG. NOTE: the non-dev ArangoDB SG is near
   # the per-SG rule quota (see the stage-alb-cloudfront-sg memory) — this adds
@@ -300,6 +308,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   AlertTopicKeyAlias:
     Type: AWS::KMS::Alias
@@ -320,6 +332,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   AlertTopicPolicy:
     Type: AWS::SNS::TopicPolicy
@@ -387,6 +403,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   MetricsScraperFunction:
     Type: AWS::Lambda::Function
@@ -506,6 +526,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   MetricsScraperSchedule:
     Type: AWS::Events::Rule
@@ -587,6 +611,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   WedgeDetectorFunction:
     Type: AWS::Lambda::Function
@@ -728,6 +756,10 @@ Resources:
           Value: !Ref Environment
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   WedgeDetectorSchedule:
     Type: AWS::Events::Rule

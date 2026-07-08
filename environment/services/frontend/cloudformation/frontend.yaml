@@ -75,6 +75,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-frontend'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # S3 Bucket Policy for CloudFront OAC
   FrontendBucketPolicy:
@@ -297,6 +301,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-cloudfront'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # CloudFront OriginRequestPolicy

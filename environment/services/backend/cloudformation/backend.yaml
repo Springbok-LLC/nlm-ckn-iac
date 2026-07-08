@@ -100,6 +100,8 @@ Resources:
         Environment: !Ref Environment
         Name: !Sub '${ProjectName}-${Environment}-django-hosts'
         ManagedBy: CloudFormation
+        Owner: springbok
+        Repository: nlm-ckn-iac
 
   DjangoCorsOriginsParameter:
     Type: AWS::SSM::Parameter
@@ -122,6 +124,8 @@ Resources:
         Environment: !Ref Environment
         Name: !Sub '${ProjectName}-${Environment}-django-cors'
         ManagedBy: CloudFormation
+        Owner: springbok
+        Repository: nlm-ckn-iac
 
   # ============================================================================
   # IAM Roles for ECS Tasks (dev and Staging)
@@ -168,6 +172,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-backend-exec-role'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -190,6 +198,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-backend-task-role'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # CloudWatch Log Group
@@ -199,6 +211,17 @@ Resources:
     Properties:
       LogGroupName: !Sub '/ecs/${ProjectName}-${Environment}-backend'
       RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: springbok
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # ECS Task Definition
@@ -273,6 +296,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-backend-task'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # ECS Service
@@ -309,6 +336,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-backend-service'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Application Auto Scaling

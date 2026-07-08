@@ -53,6 +53,10 @@ Resources:
           Value: !Sub '${ProjectName}-${Environment}-namespace'
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
 Outputs:
   NamespaceId:

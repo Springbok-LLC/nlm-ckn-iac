@@ -65,6 +65,10 @@ Resources:
           Value: CloudFormation template storage
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # S3 Bucket for Stack Outputs and State
@@ -103,6 +107,10 @@ Resources:
           Value: CloudFormation state and outputs
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # GitHub OIDC Provider
@@ -125,6 +133,10 @@ Resources:
           Value: GitHub Actions OIDC authentication
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # IAM Role for GitHub Actions
@@ -344,6 +356,10 @@ Resources:
           Value: GitHub Actions deployment role
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
 Outputs:
   TemplatesBucketName:

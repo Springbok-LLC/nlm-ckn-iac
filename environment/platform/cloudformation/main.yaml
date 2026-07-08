@@ -127,6 +127,10 @@ Resources:
           Value: secrets
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Security Groups Stack (dev only)
@@ -153,6 +157,10 @@ Resources:
           Value: security-groups
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # ECS Cluster Stack
@@ -173,6 +181,10 @@ Resources:
           Value: ecs-cluster
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Service Discovery Stack
@@ -194,6 +206,10 @@ Resources:
           Value: service-discovery
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Application Load Balancer Stack
@@ -225,6 +241,10 @@ Resources:
           Value: alb
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
 Outputs:
   # ============================================================================
