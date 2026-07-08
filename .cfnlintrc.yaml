@@ -20,3 +20,9 @@ ignore_checks:
 # tag set (Project/Owner/ManagedBy/Repository) on every taggable resource.
 append_rules:
   - .cfn-lint-rules
+
+# The sandbox stacks are legacy/experimental (cell-kn-era naming, out-of-band
+# ownership) and are intentionally exempt from linting, including the ADR 0004
+# tag rule. Do not enforce the standard tag set there.
+ignore_templates:
+  - environment/sandbox/**

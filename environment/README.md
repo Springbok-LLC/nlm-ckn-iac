@@ -22,29 +22,30 @@ bucket.
 ## AWS Architecture
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'fontFamily':'ui-sans-serif, system-ui, sans-serif', 'fontSize':'13px', 'lineColor':'#64748b', 'primaryTextColor':'#0f172a'}}}%%
 flowchart TB
-    user([Researcher browser])
+    user([Researcher browser]):::actor
 
-    subgraph edge[Edge]
-        cf[CloudFront distribution<br/>dev.nlm-ckn.org]
-        s3f[(S3 — React static assets<br/>OAC-locked)]
+    subgraph edge[" Edge / CDN "]
+        cf[CloudFront distribution<br/>dev.nlm-ckn.org]:::net
+        s3f[(S3 — React static assets<br/>OAC-locked)]:::store
     end
 
-    subgraph platform[Platform tier — main.yaml]
-        alb[Application Load Balancer<br/>:8000 backend · :8529 arango<br/>X-Custom-Origin-Header enforced]
-        cluster[ECS cluster]
-        cloudmap[Cloud Map<br/>private DNS namespace]
-        secrets[[Secrets Manager<br/>Django · ArangoDB · CloudFront header]]
+    subgraph platform[" Platform tier — main.yaml "]
+        alb[Application Load Balancer<br/>:8000 backend · :8529 arango<br/>X-Custom-Origin-Header enforced]:::net
+        cluster[ECS cluster]:::plat
+        cloudmap[Cloud Map<br/>private DNS namespace]:::plat
+        secrets[[Secrets Manager<br/>Django · ArangoDB · CloudFront header]]:::plat
     end
 
-    subgraph services[Service stacks]
-        backend[ECS Fargate<br/>Django backend]
-        arango[EC2 + EBS<br/>ArangoDB]
-        mon[Monitoring<br/>CloudWatch alarms · Lambda · SNS]
+    subgraph services[" Service stacks "]
+        backend[ECS Fargate<br/>Django backend]:::compute
+        arango[EC2 + EBS<br/>ArangoDB]:::compute
+        mon[Monitoring<br/>CloudWatch alarms · Lambda · SNS]:::compute
     end
 
-    ecr[(ECR<br/>backend image)]
-    dataset[(S3 dataset bucket<br/>golden-dump.tar.gz)]
+    ecr[(ECR<br/>backend image)]:::store
+    dataset[(S3 dataset bucket<br/>golden-dump.tar.gz)]:::store
 
     user -->|HTTPS| cf
     cf -->|default →| s3f
@@ -60,7 +61,23 @@ flowchart TB
     arango -->|arangorestore on boot| dataset
     mon -.->|watches| backend
     mon -.->|watches| arango
+
+    %% ── node categories (shared palette across environment/ and etl/) ──
+    classDef actor   fill:#ffffff,stroke:#334155,stroke-width:1px,color:#0f172a
+    classDef net     fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef plat    fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef compute fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef store   fill:#fef3c7,stroke:#d97706,color:#7c2d12
+
+    %% ── subgraph tint marks the deployment grouping ──
+    style edge     fill:#f8fafc,stroke:#cbd5e1,color:#475569
+    style platform fill:#f8fafc,stroke:#cbd5e1,color:#475569
+    style services fill:#f8fafc,stroke:#cbd5e1,color:#475569
 ```
+
+> **Legend** — node color is the resource type (🔵 blue: network / edge · 🟣
+> violet: platform / control plane · 🟢 green: compute · 🟡 amber: storage);
+> subgraph boxes group resources by the stack that provisions them.
 
 The application is deployed to **https://dev.nlm-ckn.org/**. A researcher's
 browser reaches **CloudFront**, which serves the React static assets from **S3**

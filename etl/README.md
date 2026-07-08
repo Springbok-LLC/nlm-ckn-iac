@@ -13,31 +13,34 @@ running application.
 ## AWS Architecture
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'fontFamily':'ui-sans-serif, system-ui, sans-serif', 'fontSize':'13px', 'lineColor':'#64748b', 'primaryTextColor':'#0f172a'}}}%%
 flowchart TB
-    subgraph external[External sources]
-        ncbi([NCBI · CELLxGENE · GitHub])
+    gha[GitHub Actions]:::ci
+
+    subgraph external[" External sources "]
+        ncbi([NCBI · CELLxGENE · GitHub]):::ext
     end
 
-    subgraph registries[Container registries — ecr.yaml]
-        ecrFetch[(ECR<br/>etl-fetcher)]
-        ecrPipe[(ECR<br/>etl-pipeline)]
+    subgraph registries[" Container registries — ecr.yaml "]
+        ecrFetch[(ECR<br/>etl-fetcher)]:::store
+        ecrPipe[(ECR<br/>etl-pipeline)]:::store
     end
 
-    subgraph fetchStack[Daily fetch — fetch.yaml]
-        sched[EventBridge Scheduler<br/>daily]
-        fetch[ECS Fargate<br/>fetch task]
-        creds[[SSM: NCBI email<br/>Secrets Manager: NCBI API key]]
+    subgraph fetchStack[" Daily fetch — fetch.yaml "]
+        sched[EventBridge Scheduler<br/>daily]:::plat
+        fetch[ECS Fargate<br/>fetch task]:::compute
+        creds[[SSM: NCBI email<br/>Secrets Manager: NCBI API key]]:::plat
     end
 
-    subgraph releaseStack[Release pipeline — batch.yaml]
-        batch[AWS Batch on EC2<br/>r5.2xlarge · 8 vCPU / 60 GiB]
-        arangoSibling[ArangoDB sibling container<br/>via /var/run/docker.sock]
+    subgraph releaseStack[" Release pipeline — batch.yaml "]
+        batch[AWS Batch on EC2<br/>r5.2xlarge · 8 vCPU / 60 GiB]:::compute
+        arangoSibling[ArangoDB sibling container<br/>via /var/run/docker.sock]:::compute
     end
 
-    s3[(S3 dataset bucket<br/>external/ · runs/&lt;ver&gt;/golden-dump.tar.gz)]
-    envArango[[environment/ ArangoDB<br/>arangorestore]]
+    s3[(S3 dataset bucket<br/>external/ · runs/&lt;ver&gt;/golden-dump.tar.gz)]:::store
+    envArango[[environment/ ArangoDB<br/>arangorestore]]:::downstream
 
-    gha[GitHub Actions] -->|OIDC role<br/>github-oidc.yaml| ecrFetch
+    gha -->|OIDC role<br/>github-oidc.yaml| ecrFetch
     gha -->|OIDC role| ecrPipe
     gha -->|OIDC role| batch
 
@@ -54,7 +57,26 @@ flowchart TB
     batch --- arangoSibling
     batch -->|golden dump → runs/| s3
     s3 -->|restore| envArango
+
+    %% ── node categories (shared palette across environment/ and etl/) ──
+    classDef ci         fill:#f3f4f6,stroke:#6b7280,color:#111827,stroke-width:1px
+    classDef ext        fill:#f3f4f6,stroke:#6b7280,color:#111827
+    classDef plat       fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef compute    fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef store      fill:#fef3c7,stroke:#d97706,color:#7c2d12
+    classDef downstream fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-dasharray:4 3
+
+    %% ── subgraph tint marks the CloudFormation stack grouping ──
+    style external     fill:#f8fafc,stroke:#cbd5e1,color:#475569
+    style registries   fill:#f8fafc,stroke:#cbd5e1,color:#475569
+    style fetchStack   fill:#f8fafc,stroke:#cbd5e1,color:#475569
+    style releaseStack fill:#f8fafc,stroke:#cbd5e1,color:#475569
 ```
+
+> **Legend** — node color is the resource type (⚪ gray: external / CI · 🟣
+> violet: scheduler & secrets · 🟢 green: compute · 🟡 amber: registries &
+> storage · 🔵 dashed blue: downstream, provisioned by [`environment/`](../environment/README.md));
+> subgraph boxes group resources by the CloudFormation stack that provisions them.
 
 Two flows publish into one shared **S3 dataset bucket**:
 
