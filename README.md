@@ -60,8 +60,16 @@ nlm-ckn-iac/
 │       └── parameters.json
 ├── ops/                  # Cross-cutting operator scripts
 │   └── scripts/smoke-test.sh
-└── docs/                 # Carried-over deployment/troubleshooting notes (see below)
+└── docs/                 # Cutover runbook (old cell-kn → nlm-ckn)
 ```
+
+Two areas have their own architecture docs, each with a diagram of what it
+provisions and how the pieces connect:
+
+- [`environment/README.md`](environment/README.md) — the running-application
+  tier (CloudFront, ALB, ECS backend, EC2 ArangoDB, and the platform stacks).
+- [`etl/README.md`](etl/README.md) — the data pipeline (scheduled Fargate fetch
+  and the AWS Batch release job that publishes the ArangoDB dataset).
 
 ## Deployment order
 
@@ -89,7 +97,7 @@ live under `manual/`, which holds exactly this kind of out-of-band stack (no
   environment (currently `stage`) is already serving the redirect target and
   an ACM cert covering both apex domains exists.
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full walkthrough (including NIH sandbox/prod account restrictions) and [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues.
+See [deploy/README.md](deploy/README.md) for the deploy-script reference — the deployment waves, what each stack depends on, and how each one is run.
 
 ## Migrating from the old `cell-kn` deployment
 

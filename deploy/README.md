@@ -25,5 +25,6 @@ waves with a lower number having finished.
 manually, once per account, per the command in its own header — so it isn't
 part of the numbered sequence above.
 
-See the [top-level README](../README.md) for the full directory layout and
-[docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md) for the detailed walkthrough.
+See the [top-level README](../README.md) for the full directory layout, and the
+per-area `README.md` files ([`environment/`](../environment/README.md),
+[`etl/`](../etl/README.md)) for the architecture each wave provisions.
