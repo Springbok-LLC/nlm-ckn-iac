@@ -4,7 +4,6 @@ Description: 'Backend ECS service with auto-scaling (2-10 tasks)'
 Parameters:
   ProjectName:
     Type: String
-    Default: nlm-ckn
     Description: Project name for resource naming
 
   Environment:

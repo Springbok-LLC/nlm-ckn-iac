@@ -1,9 +1,5 @@
 [
   {
-    "ParameterKey": "ProjectName",
-    "ParameterValue": "nlm-ckn"
-  },
-  {
     "ParameterKey": "Environment",
     "ParameterValue": "dev"
   },

@@ -26,7 +26,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ENVIRONMENT="${1:-stage}"
-PROJECT_NAME="nlm-ckn"
+# PROJECT_NAME comes from the shared constant (single source of truth).
+source "$(dirname "$0")/lib/common.sh"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 STACK_NAME="${PROJECT_NAME}-${ENVIRONMENT}-monitoring"
 TEMPLATE="environment/services/monitoring/cloudformation/monitoring.yaml"

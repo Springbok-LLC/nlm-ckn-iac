@@ -19,8 +19,11 @@ Description: >
 #     --template-file etl/cloudformation/github-oidc.yaml \
 #     --capabilities CAPABILITY_NAMED_IAM \
 #     --parameter-overrides \
+#       ProjectName=nlm-ckn \
 #       GitHubRepos="repo:Springbok-LLC/nlm-ckn-etl:*"
 #
+#   ProjectName is required (no template default) — it must match the value the
+#   ecr / batch stacks are deployed with (deploy/lib/common.sh, default nlm-ckn).
 #   S3BucketName resolves from SSM at deploy time — do not pass a literal
 #   bucket name via --parameter-overrides.
 #
@@ -47,7 +50,6 @@ Parameters:
 
   ProjectName:
     Type: String
-    Default: nlm-ckn
     Description: >
       Project namespace — single source of truth for the AWS resource names and
       ARNs this stack grants access to (ECR repos, Batch queue/definition, and

@@ -26,7 +26,8 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration
-PROJECT_NAME="nlm-ckn"
+# PROJECT_NAME comes from the shared constant (single source of truth).
+source "$(dirname "$0")/lib/common.sh"
 GITHUB_ORG="Springbok-LLC"
 GITHUB_REPO="nlm-ckn-ui"
 AWS_REGION=${AWS_REGION:-us-east-1}

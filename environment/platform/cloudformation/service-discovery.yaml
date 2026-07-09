@@ -4,7 +4,6 @@ Description: 'AWS Cloud Map service discovery namespace for Cell-KN'
 Parameters:
   ProjectName:
     Type: String
-    Default: nlm-ckn
     Description: Project name for resource naming
 
   Environment:

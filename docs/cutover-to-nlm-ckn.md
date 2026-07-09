@@ -1,9 +1,10 @@
 # Cutover: replacing the old `cell-kn` deployment with `nlm-ckn`
 
-This repo now provisions **`nlm-ckn`-named** resources — every template defaults
-`ProjectName` to `nlm-ckn`, and the scripts and `environment/parameters/*.json`
-set it to `nlm-ckn`. `DomainName` is already `nlm-ckn.org`, so DNS naming is
-unaffected by this change.
+This repo now provisions **`nlm-ckn`-named** resources — `ProjectName` is a
+required parameter on every template (no default) and is set once in
+`deploy/lib/common.sh`, which all deploy scripts source and pass through to the
+stacks. `DomainName` is already `nlm-ckn.org`, so DNS naming is unaffected by
+this change.
 
 The project was originally deployed under the old name `cell-kn`. Because S3
 bucket names and CloudFormation stack names **can't be renamed in place**,

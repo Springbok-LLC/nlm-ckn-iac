@@ -4,7 +4,6 @@ Description: 'Shared resources for Cell-KN - ECR repository and S3 bucket for Ar
 Parameters:
   ProjectName:
     Type: String
-    Default: nlm-ckn
     Description: Project name for resource naming
 
 Metadata:

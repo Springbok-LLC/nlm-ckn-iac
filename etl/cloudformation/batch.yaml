@@ -27,6 +27,7 @@ Description: >
 #     --stack-name nlm-ckn-etl-batch \
 #     --capabilities CAPABILITY_NAMED_IAM \
 #     --parameter-overrides \
+#         ProjectName=nlm-ckn \
 #         EcrImageUri=<account>.dkr.ecr.<region>.amazonaws.com/nlm-ckn-etl-pipeline:latest \
 #         NcbiApiKeySecretArn=<arn> \
 #         VpcId=vpc-<id> \
@@ -40,12 +41,12 @@ Parameters:
 
   ProjectName:
     Type: String
-    Default: nlm-ckn
     Description: >
       Project namespace — single source of truth for resource names, IAM
-      resource ARNs, and the Project tag (ADR 0002). Keep the default in sync
-      with the rest of the repo (and with the fetch/ecr/github-oidc stacks,
-      which reference these names cross-stack).
+      resource ARNs, and the Project tag (ADR 0002). Required (no default): the
+      deploy scripts pass it from deploy/lib/common.sh so the value is set once
+      for the whole repo (shared with the fetch/ecr/github-oidc stacks, which
+      reference these names cross-stack).
 
   Owner:
     Type: String

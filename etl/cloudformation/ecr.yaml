@@ -13,10 +13,10 @@ Parameters:
 
   ProjectName:
     Type: String
-    Default: nlm-ckn
     Description: >
       Project namespace — single source of truth for resource names and the
-      Project tag (ADR 0002). Keep the default in sync with the rest of the repo.
+      Project tag (ADR 0002). Required (no default): the deploy scripts pass it
+      from deploy/lib/common.sh so the value is set once for the whole repo.
 
   Owner:
     Type: String

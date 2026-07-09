@@ -65,7 +65,8 @@ for arg in "${@:2}"; do
        exit 1 ;;
   esac
 done
-PROJECT_NAME="nlm-ckn"
+# PROJECT_NAME comes from the shared constant (single source of truth).
+source "$(dirname "$0")/lib/common.sh"
 AWS_REGION=${AWS_REGION:-us-east-1}
 PARAMETERS_FILE="environment/parameters/${ENVIRONMENT}.json"
 
@@ -384,9 +385,13 @@ if [ "$DEPLOY_MODE" != "--services-only" ]; then
   # Build params: read from parameters file + inject TemplatesBucketName
   INFRA_PARAMS_FILE=$(mktemp "${TMPDIR_PARAMS}/params-XXXXXX")
 
+  # ProjectName is injected from the shared constant (not the parameters file),
+  # so it's set once for the whole repo. Drop any stale ProjectName in the file.
   python3 -c "
 import json, sys
 params = json.load(open('${PARAMETERS_FILE}'))
+params = [p for p in params if p['ParameterKey'] not in ('ProjectName', 'TemplatesBucketName')]
+params.append({'ParameterKey': 'ProjectName', 'ParameterValue': '${PROJECT_NAME}'})
 params.append({'ParameterKey': 'TemplatesBucketName', 'ParameterValue': '${TEMPLATES_BUCKET}'})
 print(json.dumps(params))
 " > "$INFRA_PARAMS_FILE"

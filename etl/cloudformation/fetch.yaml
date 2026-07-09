@@ -23,6 +23,7 @@ Description: >
 #     --stack-name nlm-ckn-etl-fetch \
 #     --capabilities CAPABILITY_NAMED_IAM \
 #     --parameter-overrides \
+#         ProjectName=nlm-ckn \
 #         EcrImageUri=<account>.dkr.ecr.<region>.amazonaws.com/nlm-ckn-etl-fetcher:latest \
 #         NcbiEmail=user@example.com \
 #         NcbiApiKey=<key> \
@@ -36,11 +37,11 @@ Parameters:
 
   ProjectName:
     Type: String
-    Default: nlm-ckn
     Description: >
       Project namespace — single source of truth for resource names, SSM
-      parameter paths, and the Project tag (ADR 0002). Keep the default in sync
-      with the rest of the repo.
+      parameter paths, and the Project tag (ADR 0002). Required (no default):
+      the deploy scripts pass it from deploy/lib/common.sh so the value is set
+      once for the whole repo.
 
   Owner:
     Type: String

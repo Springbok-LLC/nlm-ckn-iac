@@ -59,6 +59,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# PROJECT_NAME comes from the shared constant (single source of truth) and is
+# passed to every etl stack, which now declare ProjectName as a required param.
+source "${SCRIPT_DIR}/lib/common.sh"
+
 ENV_FILE="${REPO_ROOT}/.env"
 if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
@@ -105,7 +109,9 @@ log "Deploying ECR stack (${ECR_STACK_NAME})..."
 aws cloudformation deploy \
   --template-file "${REPO_ROOT}/etl/cloudformation/ecr.yaml" \
   --stack-name    "${ECR_STACK_NAME}" \
-  --no-fail-on-empty-changeset
+  --no-fail-on-empty-changeset \
+  --parameter-overrides \
+    ProjectName="${PROJECT_NAME}"
 
 log "ECR stack ready."
 
@@ -184,6 +190,7 @@ aws cloudformation deploy \
   --capabilities  CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --parameter-overrides \
+    ProjectName="${PROJECT_NAME}" \
     S3Bucket="${S3_BUCKET_SSM_PARAM}" \
     EcrImageUri="${PIPELINE_REPO_URI}:latest" \
     NcbiApiKeySecretArn="${NCBI_API_KEY_SECRET_ARN}" \
