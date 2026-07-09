@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Stack A - ECR Repository + ECS Cluster (EC2 capacity using a defined AMI)
+# aws cloudformation create-stack \
+#   --template-body file://08-Lifebit-Networking-ECS-Cluster.yaml \
+#   --cli-input-json file://param-files/NLM-Lifebit-Networking/NLM-Lifebit-Networking-ECS-Cluster.json \
+#   --capabilities CAPABILITY_NAMED_IAM
+
+Parameters:
+  pAwsAccount:
+    Description: 'Account (NLM-PROD, NLM-QA, NLM-INT, NLM-SEC)'
+    Type: String
+    Default: "NLM-SBOX-CELL-KN"
+
+  pAppNameLC:
+    Description: App Name
+    Type: String
+    Default: cell-kn
+
+  pVpcName:
+    Description: i.e. sb-101
+    Type: String
+    Default: vpc-101
+
+  # pAmiId:
+  #   Type: AWS::EC2::Image::Id
+  #   Description: AMI ID to use for ECS container instances (must support ECS agent)
+
+  pInstanceType:
+    Type: String
+    Default: t3.medium
+
+  pDesiredCapacity:
+    Type: Number
+    Default: 1
+
+  pMinSize:
+    Type: Number
+    Default: 1
+
+  pMaxSize:
+    Type: Number
+    Default: 2
+
+  # Subnet to co-locate the backend with ArangoDB.
+  # ArangoDB is pinned to subnet-0a0aacec5e8ceefcd (10.0.96.0/26) in the arangodb
+  # stack. Placing the backend ASG in the SAME subnet keeps backend?ArangoDB
+  # traffic intra-subnet, which bypasses NACL acl-00af2c51807e9ab93 entirely ?
+  # so the cross-subnet port-80 block goes away with no NACL change.
+  #
+  # LIMITATIONS / trade-offs of pinning to one subnet:
+  #   - Single-AZ: the backend now lives in one AZ. If that AZ/subnet has an
+  #     outage there is no capacity elsewhere. Acceptable for the single-instance
+  #     sandbox; revisit before any multi-AZ/HA posture.
+  #   - Capacity: all backend instances share one subnet's IP space and AZ, so
+  #     ASG scale-out is bounded by that subnet. With port-80-only this is already
+  #     ~one task per instance, so it's not the limiting factor today.
+  #   - Coupling: this only co-locates if the value matches ArangoDB's actual
+  #     subnet. If ArangoDB is ever moved, update this too (ideally both should
+  #     read one shared source/export rather than two hard-coded values).
+  #   - Co-location is a placement convenience, NOT access control: the security
+  #     group is still what permits backend?ArangoDB on :80. Keep that SG rule.
+  pBackendSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0a0aacec5e8ceefcd
+    Description: >
+      Subnet for the backend ASG. Defaults to ArangoDB's subnet so the two are
+      co-located (intra-subnet, no NACL traversal). Must match the subnet the
+      arangodb stack pins its EC2 instance to.
+
+  pVpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0ee6b25a12c642104
+    Description: >
+      VPC for the backend target group. Default is the sandbox VPC that hosts
+      the ALB and the backend instance.
+
+
+Resources:
+  # -----------------------------
+  # ECS Cluster
+  # -----------------------------
+  rEcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${pAppNameLC}-ECR-Cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # -----------------------------
+  # Launch Template using provided AMI
+  # -----------------------------
+  rEcsLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT30M
+    Properties:
+      LaunchTemplateData:
+        ImageId: ami-0e8aa56cf88aaa3b3
+          #Fn::Join:
+            #- ""
+            #- - '{{resolve:ssm:'
+              #- 'arn:aws:ssm:us-east-1:300197248493:parameter/standard/imagebuilder/ecs'
+              #- '}}'
+        InstanceType: !Ref pInstanceType
+        IamInstanceProfile:  #Fn::ImportValue: !Sub ${pAwsAccount}-Bastion-InstanceProfile
+          Name: "cell-kn-sandbox-arangodb-ec2"
+           # Fn::ImportValue: !Sub ${pAwsAccount}-Bastion-InstanceProfile
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${pAwsAccount}-${pVpcName}-Development-app-sg
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            exec > >(tee /var/log/backend-setup.log | logger -t backend-setup) 2>&1
+            set -euxo pipefail
+            mkdir -p /etc/ecs
+            > /etc/ecs/ecs.config
+            echo "ECS_CLUSTER=${rEcsCluster}" >> /etc/ecs/ecs.config
+ 
+            # If your AMI does NOT already include ECS agent, you must install it here.
+            # For Amazon Linux 2 ECS-optimized, the agent is pre-installed.
+            # Example installation steps are intentionally omitted because they vary by AMI.
+            systemctl stop firewalld
+            systemctl disable firewalld 
+            
+            PROJECT_NAME=cell-kn
+            REGION=us-east-1
+            
+            # ?? 1. Set Django backend app environment file for Docker ????????????????????????????????
+             mkdir -p /usr/nlm/cell-kn
+            cat << 'EOF' > /usr/nlm/cell-kn/.env
+            # == Django Settings
+            
+            # Secret key: python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+            SECRET_KEY="SECRET_KEY"
+            
+            # Set to False in production
+            DEBUG=True
+            
+            # Comma-separated list of allowed hosts (e.g., localhost,example.com)
+            ALLOWED_HOSTS=*
+            
+            # CORS Settings
+            # Set to True only for local development
+            CORS_ALLOW_ALL_ORIGINS=True
+            # Comma-separated list of allowed origins for production (e.g., https://example.com,https://api.example.com)
+            CORS_ALLOWED_ORIGINS=http://localhost:3000
+            
+            # == HTTPS Settings
+            
+            # Set all to True in production
+            SECURE_SSL_REDIRECT=False
+            SESSION_COOKIE_SECURE=False
+            CSRF_COOKIE_SECURE=False
+            
+            # == ArangoDB Connection
+            # Reach ArangoDB via Cloud Map service discovery, over port 80 (the
+            # ArangoDB instance's nginx proxies 80 -> 8529). 
+            # NOTE: "arango_db" was a leftover docker-compose service name and does not
+            # resolve in the VPC; the service-discovery name is arangodb.cell-kn-dev.local.
+            ARANGO_DB_HOST=http://arangodb.cell-kn-dev.local
+            ARANGO_DB_USER=root
+            ARANGO_DB_PASSWORD="DB_PASSWORD"
+            ARANGO_DB_NAME_ONTOLOGIES=Cell-KN-Ontologies
+            ARANGO_DB_NAME_PHENOTYPES=Cell-KN-Phenotypes
+            GRAPH_NAME_ONTOLOGIES=KN-Ontologies-v2.0
+            GRAPH_NAME_PHENOTYPES=KN-Phenotypes-v2.0
+            
+            DATA_PATH=./data
+            EOF
+
+            SECRET_KEY=$(aws secretsmanager get-secret-value \
+              --secret-id "/$PROJECT_NAME/sandbox/secrets/django-secret-key" \
+              --query "SecretString" \
+              --output text \
+              --region "$REGION")
+            
+            DB_PASSWORD=$(aws secretsmanager get-secret-value \
+              --secret-id "/$PROJECT_NAME/sandbox/secrets/arangodb-password" \
+              --query "SecretString" \
+              --output text \
+              --region "$REGION")
+            
+            sed -i "s/\"SECRET_KEY\"/$SECRET_KEY/" /usr/nlm/cell-kn/.env
+            sed -i "s/\"DB_PASSWORD\"/$DB_PASSWORD/" /usr/nlm/cell-kn/.env
+
+            # ?? 2. Run Django backend app via Docker ????????????????????????????????
+            systemctl enable docker
+            systemctl start docker
+            
+            DJANGO_SECRET=$(aws secretsmanager get-secret-value \
+              --secret-id "/$PROJECT_NAME/sandbox/secrets/django-secret-key" \
+              --query "SecretString" \
+              --output text \
+              --region "$REGION")
+            
+            # IMDSv2 token (AL2023 requires token-based metadata access)
+            IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+              -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+            INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+              http://169.254.169.254/latest/meta-data/instance-id)
+            
+            # logs Docker into AWS ECR registry.
+            aws ecr get-login-password --region us-east-1 \
+              | docker login --username AWS --password-stdin '206537881715.dkr.ecr.us-east-1.amazonaws.com'
+  
+            # Pull the latest backend image from ECR
+            docker pull '206537881715.dkr.ecr.us-east-1.amazonaws.com/cell-kn-project:cell-kn-backend'  
+  
+            # Run the backend container with environment variables and logging configuration
+            docker run -d \
+              --name backend \
+              --restart unless-stopped \
+              -p 80:8000 \
+              --env-file /usr/nlm/cell-kn/.env  \
+              206537881715.dkr.ecr.us-east-1.amazonaws.com/cell-kn-project:cell-kn-backend
+
+            # Validate that the container is running (optional, for debugging)
+            if docker ps --filter "name=backend" --filter "status=running" | grep -q backend; then
+              echo "Backend container is running successfully."
+            else
+              echo "Error: Backend container failed to start."
+              exit 1
+            fi
+
+
+  # -----------------------------
+  # Backend target group ? traffic on PORT 80. Named `?-backend-tg-80` to avoid
+  # a name collision with the existing `?-backend-tg`. The ARN is exported below
+  # for the ALB listener to forward to. See the PR description for the rationale
+  # and the listener-repoint cutover steps.
+  rBackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${pAppNameLC}-sandbox-backend-tg-80
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref pVpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPort: traffic-port   # = 80; check and real traffic now hit the same port
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health/
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 10
+      Matcher:
+        HttpCode: 200-399
+      Tags:
+        - Key: Name
+          Value: !Sub ${pAppNameLC}-sandbox-backend-tg-80
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # -----------------------------
+  # Auto Scaling Group for ECS capacity
+  # -----------------------------
+  rEcsAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      # Co-located with ArangoDB: pinned to a single subnet (pBackendSubnetId,
+      # default = ArangoDB's subnet) so backend?ArangoDB stays intra-subnet and
+      # never crosses the NACL. See pBackendSubnetId for the limitations this
+      # introduces (single-AZ, subnet-bounded scaling). To restore multi-AZ
+      # spread, list the app-a/b/c imports again instead ? but that reopens the
+      # cross-subnet NACL problem (DRIFT item 5) unless the NACL is also fixed.
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub ${pAwsAccount}-${pVpcName}-subnet-private-Development-app-a
+      # Previous (multi-AZ, but not co-located with ArangoDB):
+      #   - Fn::ImportValue: !Sub ${pAwsAccount}-${pVpcName}-subnet-private-Development-app-a
+      #   - Fn::ImportValue: !Sub ${pAwsAccount}-${pVpcName}-subnet-private-Development-app-b
+      #   - Fn::ImportValue: !Sub ${pAwsAccount}-${pVpcName}-subnet-private-Development-app-c
+      MinSize: !Ref pMinSize
+      MaxSize: !Ref pMaxSize
+      DesiredCapacity: !Ref pDesiredCapacity
+      LaunchTemplate:
+        LaunchTemplateId: !Ref rEcsLaunchTemplate
+        Version: !GetAtt rEcsLaunchTemplate.LatestVersionNumber
+      # Register instances into BOTH backend target groups during the cutover.
+      # The ASG registers on each TG's default port:
+      #   - new ?-backend-tg-80 (port 80)  ? health check AND real traffic on :80
+      #   - old ?-backend-tg     (port 8000, ImportValue) ? kept registered so the
+      #     :443 listener's priority-50 rule (still pointing at it) doesn't fall to
+      #     an empty target group while the loadbalancer stack is repointed.
+      #
+      # CUTOVER ORDER:
+      #   1. Deploy this stack  ? instance is in both TGs; no change in behavior.
+      #   2. Repoint the ALB :443 listener rules to ?-backend-tg-80-arn (in the
+      #      `?cellkn-loadbalancer` stack)  ? traffic now flows over :80.
+      #   3. Follow-up: remove the old ImportValue line below once the listener no
+      #      longer references the :8000 group.
+      TargetGroupARNs:
+        - !Ref rBackendTargetGroup
+        - Fn::ImportValue: !Sub ${pAppNameLC}-sandbox-backend-tg-arn   # old :8000 TG ? remove after listener cutover (step 3)
+        #- arn:aws:elasticloadbalancing:us-east-1:206537881715:targetgroup/cell-kn-sandbox-backend-tg/fcf51f84ed1fb850
+      Tags:
+        - Key: Name
+          Value: !Sub ${pAwsAccount}-ECS-Cluster-Auto-Scaling-Group
+          PropagateAtLaunch: true
+
+  # -----------------------------
+  # Capacity Provider (recommended for EC2 ECS)
+  # -----------------------------
+  rEcsCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref rEcsAutoScalingGroup
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 100
+          MinimumScalingStepSize: 1
+          MaximumScalingStepSize: 2
+        ManagedTerminationProtection: DISABLED
+
+  rEcsClusterCapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref rEcsCluster
+      CapacityProviders:
+        - !Ref rEcsCapacityProvider
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: !Ref rEcsCapacityProvider
+          Weight: 1
+
+Outputs:
+  oEcsClusterName:
+    Value: !Ref rEcsCluster
+    Export:
+      Name: !Sub ${pAwsAccount}-${pAppNameLC}-ECS-Cluster
+
+  # ARN of the port-80 backend target group. Repoint the ALB :443 listener rules
+  # (in the `?cellkn-loadbalancer` stack) to this export to complete the port-80 cutover.
+  oBackendTargetGroupArn:
+    Description: Port-80 backend target group ARN (for the ALB listener to forward to)
+    Value: !Ref rBackendTargetGroup
+    Export:
+      Name: !Sub ${pAppNameLC}-sandbox-backend-tg-80-arn
+

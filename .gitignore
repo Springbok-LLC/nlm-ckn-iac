@@ -1,0 +1,14 @@
+# Environment / credentials
+.env
+*.pem
+
+# OS / editor
+.DS_Store
+*~
+.idea
+.vscode
+
+# Local scratch
+*.tar.gz
+*.log
+*.pyc

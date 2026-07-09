@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Application Load Balancer for Cell-KN'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cell-kn
+    Description: Project name for resource naming
+
+  Environment:
+    Type: String
+    Default: sandbox
+    Description: Environment name (dev, sandbox, prod)
+    AllowedValues:
+      - dev
+      - sandbox
+      - prod
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Configuration
+        Parameters:
+          - ProjectName
+          - Environment
+
+Resources:
+  # ============================================================================
+  # S3 Bucket for ALB Access Logs
+  # ============================================================================
+  AlbLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-alb-logs-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-alb-logs-${AWS::AccountId}'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AlbLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AlbLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # ELB service account for the region ? required for ALB access logs.
+          # Account IDs are fixed per region: https://docs.aws.amazon.com/elasticloadbalancing/latest/application/enable-access-logging.html
+          - Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::127311923021:root
+            Action: s3:PutObject
+            Resource: !Sub '${AlbLogsBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
+
+Outputs:
+  BucketName:
+    Description: S3 bucket name for frontend
+    Value: !Ref AlbLogsBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-alb-bucket'

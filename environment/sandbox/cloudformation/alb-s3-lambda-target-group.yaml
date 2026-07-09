@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda function and ALB target group for serving S3 content
+
+Parameters:
+  pProjectName:
+    Type: String
+
+  pEnvironment:
+    Type: String
+
+  pLambdaFunctionName:
+    Type: String
+    Default: alb-s3-content-handler
+
+  pTargetGroupName:
+    Type: String
+    Default: alb-s3-lambda-tg
+
+  pS3KeyPrefix:
+    Type: String
+    Default: ''
+    Description: Optional prefix inside the bucket, for example static or site
+
+  pDefaultIndexKey:
+    Type: String
+    Default: index.html
+    Description: Object to serve for /
+
+  pMaxObjectBytes:
+    Type: Number
+    Default: 700000
+    Description: Max allowed object size in bytes
+
+Resources:
+  rS3ContentLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${pProjectName}-${pEnvironment}-${pLambdaFunctionName}
+      Runtime: python3.12
+      Handler: index.handler
+      Role:
+        Fn::ImportValue: !Sub ${pProjectName}-${pEnvironment}-oLambdaExecutionRoleArn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          BUCKET_NAME: !Sub ${pProjectName}-${pEnvironment}-frontend
+          KEY_PREFIX: !Ref pS3KeyPrefix
+          DEFAULT_INDEX_KEY: !Ref pDefaultIndexKey
+          MAX_OBJECT_BYTES: !Ref pMaxObjectBytes
+      Code:
+        ZipFile: |
+          import os
+          import base64
+          import mimetypes
+          import posixpath
+          import boto3
+          from botocore.exceptions import ClientError
+
+          s3 = boto3.client("s3")
+
+          BUCKET_NAME = os.environ["BUCKET_NAME"]
+          KEY_PREFIX = os.environ.get("KEY_PREFIX", "").strip("/")
+          DEFAULT_INDEX_KEY = os.environ.get("DEFAULT_INDEX_KEY", "index.html")
+          MAX_OBJECT_BYTES = int(os.environ.get("MAX_OBJECT_BYTES", "700000"))
+
+          TEXT_TYPES = {
+              "application/json",
+              "application/javascript",
+              "application/xml",
+              "image/svg+xml"
+          }
+
+          def build_key(path_value):
+              path_value = (path_value or "/").split("?", 1)[0]
+              path_value = path_value.lstrip("/")
+
+              if path_value == "":
+                  path_value = DEFAULT_INDEX_KEY
+
+              if path_value.endswith("/"):
+                  path_value = f"{path_value}{DEFAULT_INDEX_KEY}"
+
+              normalized = posixpath.normpath(path_value)
+              if normalized in (".", ""):
+                  normalized = DEFAULT_INDEX_KEY
+
+              if normalized == ".." or normalized.startswith("../"):
+                  raise ValueError("invalid path")
+
+              if KEY_PREFIX:
+                  return f"{KEY_PREFIX}/{normalized}"
+              return normalized
+
+          def make_response(status_code, body, content_type="text/plain", is_base64=False, extra_headers=None):
+              headers = {
+                  "Content-Type": content_type
+              }
+              if extra_headers:
+                  headers.update(extra_headers)
+
+              return {
+                  "statusCode": status_code,
+                  "statusDescription": f"{status_code}",
+                  "isBase64Encoded": is_base64,
+                  "headers": headers,
+                  "body": body
+              }
+
+          def is_text_content(content_type):
+              return (
+                  content_type.startswith("text/") or
+                  content_type in TEXT_TYPES
+              )
+
+          def handler(event, context):
+              path = event.get("path", "/")
+
+              if path == "/health":
+                  return make_response(200, "ok", "text/plain")
+
+              try:
+                  key = build_key(path)
+              except ValueError:
+                  return make_response(400, "Bad request", "text/plain")
+
+              try:
+                  head = s3.head_object(Bucket=BUCKET_NAME, Key=key)
+              except ClientError as e:
+                  code = e.response.get("Error", {}).get("Code", "")
+                  if code in ("404", "NoSuchKey", "NotFound"):
+                      return make_response(404, "Not found", "text/plain")
+                  return make_response(502, "S3 head_object failed", "text/plain")
+
+              content_length = head.get("ContentLength", 0)
+              if content_length > MAX_OBJECT_BYTES:
+                  return make_response(413, "File too large", "text/plain")
+
+              try:
+                  obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
+              except ClientError:
+                  return make_response(502, "S3 get_object failed", "text/plain")
+
+              content = obj["Body"].read()
+              content_type = obj.get("ContentType") or mimetypes.guess_type(key)[0] or "application/octet-stream"
+
+              response_headers = {}
+
+              cache_control = obj.get("CacheControl")
+              if cache_control:
+                  response_headers["Cache-Control"] = cache_control
+
+              etag = obj.get("ETag")
+              if etag:
+                  response_headers["ETag"] = etag
+
+              last_modified = obj.get("LastModified")
+              if last_modified:
+                  response_headers["Last-Modified"] = last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+              if is_text_content(content_type):
+                  return make_response(
+                      200,
+                      content.decode("utf-8", errors="replace"),
+                      content_type=content_type,
+                      is_base64=False,
+                      extra_headers=response_headers
+                  )
+
+              encoded = base64.b64encode(content).decode("ascii")
+              return make_response(
+                  200,
+                  encoded,
+                  content_type=content_type,
+                  is_base64=True,
+                  extra_headers=response_headers
+              )
+
+  rAlbInvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt rS3ContentLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: elasticloadbalancing.amazonaws.com
+
+  rS3LambdaTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn:
+      - rAlbInvokeLambdaPermission
+    Properties:
+      Name: !Sub ${pProjectName}-${pEnvironment}-${pTargetGroupName}
+      TargetType: lambda
+      HealthCheckEnabled: false
+      Targets:
+        - Id: !GetAtt rS3ContentLambda.Arn
+
+Outputs:
+  oLambdaArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt rS3ContentLambda.Arn
+    Export:
+      Name: !Sub ${pProjectName}-${pEnvironment}-oLambdaArn
+
+  oTargetGroupArn:
+    Description: ARN of the ALB Lambda target group
+    Value: !Ref rS3LambdaTargetGroup
+    Export:
+      Name: !Sub ${pProjectName}-${pEnvironment}-oTargetGroupArn

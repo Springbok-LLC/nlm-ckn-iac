@@ -4,7 +4,6 @@ Description: 'Bootstrap infrastructure for Cell-KN - S3 for templates, OIDC prov
 Parameters:
   ProjectName:
     Type: String
-    Default: cell-kn
     Description: Project name for resource naming
 
   GitHubOrg:
@@ -65,6 +64,10 @@ Resources:
           Value: CloudFormation template storage
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # S3 Bucket for Stack Outputs and State
@@ -103,6 +106,10 @@ Resources:
           Value: CloudFormation state and outputs
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # GitHub OIDC Provider
@@ -125,6 +132,10 @@ Resources:
           Value: GitHub Actions OIDC authentication
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # IAM Role for GitHub Actions
@@ -344,6 +355,10 @@ Resources:
           Value: GitHub Actions deployment role
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
 Outputs:
   TemplatesBucketName:
@@ -380,5 +395,5 @@ Outputs:
     Value: !Sub |
       Bootstrap complete! Next steps:
       1. Configure GitHub Actions to use role: ${GitHubActionsRole.Arn}
-      2. Deploy an environment: ./scripts/deploy-environment.sh dev
-      See cloudformation/DEPLOYMENT.md for full details.
+      2. Deploy an environment: ./deploy/02-deploy-environment.sh dev
+      See docs/DEPLOYMENT.md for full details.

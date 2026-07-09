@@ -4,7 +4,6 @@ Description: 'Shared resources for Cell-KN - ECR repository and S3 bucket for Ar
 Parameters:
   ProjectName:
     Type: String
-    Default: cell-kn
     Description: Project name for resource naming
 
 Metadata:
@@ -74,6 +73,10 @@ Resources:
           Value: Backend Docker images for all environments
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # S3 Bucket for ArangoDB Datasets
@@ -122,6 +125,10 @@ Resources:
           Value: ArangoDB datasets for all environments
         - Key: ManagedBy
           Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # S3 Bucket Policy for cross-account access
   ArangoDbDataBucketPolicy:

@@ -12,7 +12,7 @@
 # Nothing is restarted, resized, or restored.
 #
 # USAGE:
-#   AWS_PROFILE=springbok ./scripts/ops/smoke-test.sh [env] [options]
+#   AWS_PROFILE=springbok ./ops/scripts/smoke-test.sh [env] [options]
 #
 #   env             Environment: dev | stage | prod | sandbox (default: stage).
 #                   Used to resolve the base URL from the frontend stack output.
@@ -32,7 +32,7 @@ ENVIRONMENT="stage"
 BASE_URL="${BASE_URL:-}"
 TIMEOUT=10
 INSECURE=""
-PROJECT="cell-kn"
+PROJECT="nlm-ckn"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 
 while [ $# -gt 0 ]; do

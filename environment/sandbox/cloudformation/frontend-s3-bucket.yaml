@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Frontend S3 bucket and CloudFront distribution'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cell-kn
+    Description: Project name for resource naming
+
+  Environment:
+    Type: String
+    Default: sandbox
+    Description: Environment name (dev, sandbox, prod)
+    AllowedValues:
+      - dev
+      - sandbox
+      - prod
+
+  # All other inputs come from cross-stack imports:
+  #   DomainName      ? ${ProjectName}-${Environment}-domain-name
+  #   HostedZoneId    ? ${ProjectName}-${Environment}-hosted-zone-id
+  #   AlbDnsName      ? ${ProjectName}-${Environment}-alb-dns
+  #   CertificateArn  ? ${ProjectName}-${Environment}-acm-cert-arn
+  #   CloudFrontSecret ? {{resolve:secretsmanager:/${ProjectName}/${Environment}/secrets/cloudfront-secret:SecretString}}
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Configuration
+        Parameters:
+          - ProjectName
+          - Environment
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, 'prod']
+
+Resources:
+  # ============================================================================
+  # S3 Bucket for Frontend
+  # ============================================================================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-frontend'
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNonCurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+            ExpiredObjectDeleteMarker: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-frontend'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # S3 Bucket Policy for CloudFront OAC
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*'
+
+Outputs:
+  BucketName:
+    Description: S3 bucket name for frontend
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-frontend-bucket'
+
+

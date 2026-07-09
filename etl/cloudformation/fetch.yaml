@@ -12,34 +12,61 @@ Description: >
 # which supports secret values natively and integrates with ECS task secrets.
 #
 # Prerequisites:
-#   - ECR repository with the nlm-ckn-etl image already pushed
+#   - ECR repository with the fetcher image already pushed (etl/cloudformation/ecr.yaml)
 #   - Private subnets with a NAT gateway (task needs outbound internet for APIs)
-#   - S3 bucket already created (referenced by name, not created here)
+#   - shared/cloudformation/shared-resources.yaml deployed (provides the
+#     ArangoDB dataset bucket, mirrored to SSM at the S3Bucket Default below)
 #
 # Deploy:
 #   aws cloudformation deploy \
-#     --template-file cloudformation/fetch.yaml \
+#     --template-file etl/cloudformation/fetch.yaml \
 #     --stack-name nlm-ckn-etl-fetch \
 #     --capabilities CAPABILITY_NAMED_IAM \
 #     --parameter-overrides \
-#         S3Bucket=<bucket> \
-#         EcrImageUri=<account>.dkr.ecr.<region>.amazonaws.com/nlm-ckn-etl:latest \
+#         ProjectName=nlm-ckn \
+#         EcrImageUri=<account>.dkr.ecr.<region>.amazonaws.com/nlm-ckn-etl-fetcher:latest \
 #         NcbiEmail=user@example.com \
 #         NcbiApiKey=<key> \
 #         VpcId=vpc-<id> \
 #         SubnetIds=subnet-<a>,subnet-<b>
+#
+#   S3Bucket resolves from SSM at deploy time — do not pass a literal bucket
+#   name via --parameter-overrides.
 
 Parameters:
 
-  S3Bucket:
+  ProjectName:
     Type: String
-    Description: S3 bucket for external cache, staging, and run artifacts.
+    Description: >
+      Project namespace — single source of truth for resource names, SSM
+      parameter paths, and the Project tag (ADR 0002). Required (no default):
+      the deploy scripts pass it from deploy/lib/common.sh so the value is set
+      once for the whole repo.
+
+  Owner:
+    Type: String
+    Default: springbok
+    Description: >
+      Owning team or contact, applied as the Owner tag (ADR 0004). Set this to
+      the real owning team/distribution list.
+
+  S3Bucket:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /nlm-ckn/shared/arangodb-bucket-name
+    Description: >
+      S3 bucket for external cache, staging, and run artifacts. This
+      parameter's value is an SSM parameter name (kept up to date by
+      deploy/01-deploy-account-setup.sh whenever
+      shared/cloudformation/shared-resources.yaml is deployed); CloudFormation
+      resolves it to the live bucket name at deploy time. If ProjectName
+      changes, override this Default to /<project>/shared/arangodb-bucket-name.
+
 
   EcrImageUri:
     Type: String
     Description: >
-      Full ECR image URI, e.g.
-      123456789012.dkr.ecr.us-east-1.amazonaws.com/nlm-ckn-etl:latest
+      Full ECR image URI for the fetcher image, e.g.
+      123456789012.dkr.ecr.us-east-1.amazonaws.com/nlm-ckn-etl-fetcher:latest
 
   NcbiEmail:
     Type: String
@@ -96,30 +123,53 @@ Resources:
   NcbiEmailParameter:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: /nlm-ckn/ncbi-email
+      Name: !Sub '/${ProjectName}/ncbi-email'
       Type: String
       Value: !Ref NcbiEmail
       Description: NCBI E-Utilities email for the NLM-CKN ETL fetch task.
       Tags:
-        Project: nlm-ckn
+        Project: !Ref ProjectName
+        Component: etl
+        Owner: !Ref Owner
+        ManagedBy: CloudFormation
+        Repository: nlm-ckn-iac
 
   NcbiApiKeySecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: /nlm-ckn/ncbi-api-key
+      Name: !Sub '/${ProjectName}/ncbi-api-key'
       Description: NCBI E-Utilities API key for the NLM-CKN ETL fetch task.
       SecretString: !Ref NcbiApiKey
       Tags:
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── Logging ──────────────────────────────────────────────────────────────────
 
   FetchLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: /ecs/nlm-ckn-fetch
+      LogGroupName: !Sub '/ecs/${ProjectName}-fetch'
       RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── Networking ───────────────────────────────────────────────────────────────
 
@@ -146,22 +196,38 @@ Resources:
           Description: Allow DNS outbound (TCP fallback)
       Tags:
         - Key: Name
-          Value: nlm-ckn-fetch
+          Value: !Sub '${ProjectName}-fetch'
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── ECS Cluster ──────────────────────────────────────────────────────────────
 
   FetchCluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: nlm-ckn-fetch
+      ClusterName: !Sub '${ProjectName}-fetch'
       ClusterSettings:
         - Name: containerInsights
           Value: enabled
       Tags:
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── IAM: Task Execution Role ──────────────────────────────────────────────────
   # Used by ECS itself to pull the image from ECR, write logs to CloudWatch,
@@ -170,9 +236,9 @@ Resources:
   TaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: nlm-ckn-fetch-execution-role
+      RoleName: !Sub '${ProjectName}-fetch-execution-role'
       Description: >
-        Allows ECS to pull the nlm-ckn-etl image from ECR, stream logs to
+        Allows ECS to pull the fetcher image from ECR, stream logs to
         CloudWatch, and inject NCBI credentials from SSM and Secrets Manager.
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -191,14 +257,22 @@ Resources:
               - Sid: ReadSsmParameters
                 Effect: Allow
                 Action: ssm:GetParameters
-                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/nlm-ckn/*'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/*'
               - Sid: ReadApiKeySecret
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Ref NcbiApiKeySecret
       Tags:
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── IAM: Task Role ────────────────────────────────────────────────────────────
   # Runtime permissions used by application code inside the container.
@@ -206,7 +280,7 @@ Resources:
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: nlm-ckn-fetch-task-role
+      RoleName: !Sub '${ProjectName}-fetch-task-role'
       Description: >
         Runtime S3 permissions for the fetch container: read the live external
         cache to resume interrupted runs, write new data to staging, and
@@ -246,7 +320,15 @@ Resources:
                 Resource: !Sub 'arn:aws:s3:::${S3Bucket}/runs/*'
       Tags:
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── IAM: Scheduler Role ───────────────────────────────────────────────────────
   # Used by EventBridge Scheduler to call ECS RunTask on our behalf.
@@ -254,7 +336,7 @@ Resources:
   SchedulerRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: nlm-ckn-fetch-scheduler-role
+      RoleName: !Sub '${ProjectName}-fetch-scheduler-role'
       Description: Allows EventBridge Scheduler to launch the fetch ECS Fargate task.
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -280,14 +362,22 @@ Resources:
                   - !GetAtt TaskRole.Arn
       Tags:
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── ECS Task Definition ───────────────────────────────────────────────────────
 
   FetchTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: nlm-ckn-fetch
+      Family: !Sub '${ProjectName}-fetch'
       Cpu: !Ref TaskCpu
       Memory: !Ref TaskMemoryMiB
       NetworkMode: awsvpc
@@ -308,7 +398,7 @@ Resources:
               Value: !Ref CknRun
           Secrets:
             - Name: NCBI_EMAIL
-              ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/nlm-ckn/ncbi-email'
+              ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/ncbi-email'
             - Name: NCBI_API_KEY
               ValueFrom: !Ref NcbiApiKeySecret
           LogConfiguration:
@@ -320,14 +410,22 @@ Resources:
           StopTimeout: 120
       Tags:
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── EventBridge Scheduler ─────────────────────────────────────────────────────
 
   FetchSchedule:
     Type: AWS::Scheduler::Schedule
     Properties:
-      Name: nlm-ckn-fetch-daily
+      Name: !Sub '${ProjectName}-fetch-daily'
       Description: Triggers the NLM-CKN external API fetch Fargate task on a daily schedule.
       ScheduleExpression: !Ref ScheduleExpression
       ScheduleExpressionTimezone: UTC
@@ -339,6 +437,9 @@ Resources:
         EcsParameters:
           TaskDefinitionArn: !Ref FetchTaskDefinition
           LaunchType: FARGATE
+          # Propagate the task-definition tags onto each scheduled task.
+          PropagateTags: TASK_DEFINITION
+          EnableECSManagedTags: true
           NetworkConfiguration:
             AwsvpcConfiguration:
               AssignPublicIp: DISABLED
@@ -362,7 +463,7 @@ Outputs:
 
   NcbiEmailParameterName:
     Value: !Ref NcbiEmailParameter
-    Description: SSM parameter name for the NCBI email (/nlm-ckn/ncbi-email).
+    Description: SSM parameter name for the NCBI email (/<project>/ncbi-email).
 
   NcbiApiKeySecretArn:
     Value: !Ref NcbiApiKeySecret
@@ -370,8 +471,8 @@ Outputs:
 
   LogGroupName:
     Value: !Ref FetchLogGroup
-    Description: CloudWatch log group for fetch task output (/ecs/nlm-ckn-fetch).
+    Description: CloudWatch log group for fetch task output (/ecs/<project>-fetch).
 
   ScheduleName:
     Value: !Ref FetchSchedule
-    Description: EventBridge Scheduler schedule name (nlm-ckn-fetch-daily).
+    Description: EventBridge Scheduler schedule name (<project>-fetch-daily).

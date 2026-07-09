@@ -1,9 +1,31 @@
-# cfn-lint configuration for cell-kn CloudFormation templates
+# cfn-lint configuration for nlm-ckn-iac CloudFormation templates
+# (covers both the nlm-ckn-named app stacks, pending rename, and the
+# nlm-ckn-etl-named pipeline stacks)
 # https://github.com/aws-cloudformation/cfn-lint
 
 # Suppress W1030 for parameters that are intentionally empty in dev and
 # conditionally resolved to a real ARN in sandbox/prod via !If.
 # cfn-lint cannot evaluate !If conditions at lint time so it flags the
 # empty-string Default as non-matching against the ARN property schema.
+#
+# Suppress W6001 for outputs that build a computed value (e.g. a URL) out of
+# a cross-stack ImportValue rather than re-exporting it verbatim. cfn-lint
+# flags any ImportValue reachable from an Output as a pointless re-export,
+# even when it's just one input to a larger Fn::Sub.
 ignore_checks:
   - W1030
+  - W6001
+
+# Custom rules (see .cfn-lint-rules/):
+#   E9101 — ADR 0004 standard tag set (Project/Owner/ManagedBy/Repository) on
+#           every taggable resource.
+#   E9102 — tag propagation enabled on resources that launch tasks/instances
+#           (ECS services, Batch job definitions, Scheduler ECS targets).
+append_rules:
+  - .cfn-lint-rules
+
+# The sandbox stacks are legacy/experimental (cell-kn-era naming, out-of-band
+# ownership) and are intentionally exempt from linting, including the ADR 0004
+# tag rule. Do not enforce the standard tag set there.
+ignore_templates:
+  - environment/sandbox/**

@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ArangoDB on EC2 with EBS persistence and S3 restore capability'
+# Stack Name: NLM-SBOX-CELL-KN-arangodb-role
+# aws cloudformation create-stack \
+#   --stack-name NLM-SBOX-CELL-KN-arangodb-role \
+#   --template-body file://arangodb-role.yaml \
+#   --parameters ParameterKey=pAppNameLC,ParameterValue=arangodb \
+#   --capabilities CAPABILITY_NAMED_IAM
+Parameters:
+  pAWSAccount:
+    Description: Account (NLM-PROD, NLM-QA, NLM-INT, NLM-SEC)
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /standard/pAwsAccount
+  pAppNameLC:
+    Description: Application Name (lowercase)
+    Type: String
+    Default: "arangodb"
+  pProjectName:
+    Type: String
+    Default: "cell-kn"
+    Description: Project name for resource naming
+  pEnvironment:
+    Type: String
+    Default: "sandbox"
+    Description: pEnvironment name (dev, sandbox, prod)
+    AllowedValues:
+      - dev
+      - sandbox
+      - prod
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Configuration
+        Parameters:
+          - pProjectName
+          - pEnvironment
+
+Conditions:
+  IsDev: !Equals [!Ref pEnvironment, 'sandbox']
+
+Resources:
+  # ============================================================================
+  # IAM Role + Instance Profile (dev only)
+  # In sandbox/prod these are pre-created and passed in as InstanceProfileArn.
+  # ============================================================================
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Condition: IsDev
+    Properties:
+      RoleName: !Sub '${pAWSAccount}-${pProjectName}-${pAppNameLC}-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # SSM Session Manager access (replaces SSH)
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        # CloudWatch agent
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy'
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${pProjectName}-arangodb-data-*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${pProjectName}-arangodb-data-*/*'
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${pProjectName}/${pEnvironment}/arango/*'
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${pProjectName}/shared/arangodb-bucket-name'
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/${pProjectName}/${pEnvironment}/secrets/*'
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ec2/${pProjectName}-${pEnvironment}-arangodb:*'
+        - PolicyName: ServiceDiscoveryAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - servicediscovery:RegisterInstance
+                  - servicediscovery:DeregisterInstance
+                  - servicediscovery:GetOperation
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                  - route53:CreateHealthCheck
+                  - route53:DeleteHealthCheck
+                  - route53:UpdateHealthCheck
+                Resource: '*'
+        - PolicyName: AlbTargetRegistration
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:RegisterTargets
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - cloudformation:ListExports
+                Resource: '*'
+        - PolicyName: EcrAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref pProjectName
+        - Key: pEnvironment
+          Value: !Ref pEnvironment
+        - Key: Name
+          Value: !Sub '${pProjectName}-${pEnvironment}-arangodb-ec2-role'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: IsDev
+    Properties:
+      InstanceProfileName: !Sub '${pProjectName}-${pEnvironment}-arangodb-ec2'
+      Roles:
+        - !Ref InstanceRole

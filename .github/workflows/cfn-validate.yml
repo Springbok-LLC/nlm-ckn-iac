@@ -1,0 +1,112 @@
+name: CFN validate
+
+# Lint and dry-run the CloudFormation templates that changed in a push or PR.
+# Offline only — no AWS credentials required. A real `aws cloudformation
+# validate-template` / changeset dry run would need OIDC creds; this repo's
+# roles (account/cloudformation/bootstrap.yaml, etl/cloudformation/github-oidc.yaml)
+# don't yet trust Springbok-LLC/nlm-ckn-iac, so we validate offline instead.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine changed templates
+        id: changed
+        shell: bash
+        env:
+          # Pass context through env (never interpolate ${{ }} into run scripts).
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_REF" || true
+            BASE="origin/$BASE_REF"
+          else
+            BASE="$BEFORE_SHA"
+          fi
+          # Fall back to validating ALL templates when the base is unknown
+          # (new branch, first commit, force-push, etc.).
+          if [ -z "${BASE:-}" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+               || ! git rev-parse --verify -q "$BASE" >/dev/null; then
+            echo "Base commit unavailable — validating ALL templates."
+            TEMPLATES=$(git ls-files ':(glob)**/cloudformation/*.yaml')
+          else
+            TEMPLATES=$(git diff --name-only --diff-filter=ACMR "$BASE" HEAD -- ':(glob)**/cloudformation/*.yaml')
+          fi
+          {
+            echo "templates<<EOF"
+            echo "$TEMPLATES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ -z "$TEMPLATES" ]; then
+            echo "No CloudFormation templates changed — nothing to validate."
+          else
+            echo "Changed templates:"; echo "$TEMPLATES"
+          fi
+
+      - name: Set up Python
+        if: steps.changed.outputs.templates != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install cfn-lint
+        if: steps.changed.outputs.templates != ''
+        run: pip install cfn-lint
+
+      - name: Lint changed templates (cfn-lint)
+        if: steps.changed.outputs.templates != ''
+        shell: bash
+        env:
+          TEMPLATES: ${{ steps.changed.outputs.templates }}
+        run: |
+          set -euo pipefail
+          mapfile -t FILES <<< "$TEMPLATES"
+          # Uses the repo's .cfnlintrc.yaml automatically.
+          cfn-lint "${FILES[@]}"
+
+      - name: Dry run — resolve nested-stack references
+        if: steps.changed.outputs.templates != ''
+        shell: bash
+        env:
+          TEMPLATES: ${{ steps.changed.outputs.templates }}
+        run: |
+          set -euo pipefail
+          # Offline "dry run": for each changed parent template, confirm every
+          # nested-stack child it references via a TemplateURL exists locally
+          # (main.yaml uploads its children to s3://<bucket>/environment/<child>.yaml,
+          # and those children are its siblings on disk). A missing or renamed
+          # child is a deploy-time failure that cfn-lint does not catch.
+          fail=0
+          mapfile -t FILES <<< "$TEMPLATES"
+          for t in "${FILES[@]}"; do
+            [ -n "$t" ] || continue
+            dir=$(dirname "$t")
+            while read -r child; do
+              [ -n "$child" ] || continue
+              if [ -f "$dir/$child" ]; then
+                echo "ok: $t -> $child"
+              else
+                echo "::error file=$t::nested TemplateURL references missing child template '$child'"
+                fail=1
+              fi
+            done < <(grep -oE 'amazonaws\.com/[A-Za-z0-9._/-]+\.yaml' "$t" | sed -E 's#.*/##' | sort -u)
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "Nested-stack reference check failed."
+            exit 1
+          fi
+          echo "Nested-stack references resolved (or none present)."

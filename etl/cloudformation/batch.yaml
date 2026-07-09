@@ -10,32 +10,62 @@ Description: >
 # release.py needs to start the ArangoDB sibling container via the Docker SDK.
 #
 # NCBI credentials are shared with the fetch stack: NCBI_EMAIL is read from the
-# SSM parameter /nlm-ckn/ncbi-email and NCBI_API_KEY from Secrets Manager at
-# NcbiApiKeySecretArn (both created by cloudformation/fetch.yaml).
+# SSM parameter /<project>/ncbi-email and NCBI_API_KEY from Secrets Manager at
+# NcbiApiKeySecretArn (both created by etl/cloudformation/fetch.yaml).
 #
 # Prerequisites:
-#   - cloudformation/fetch.yaml deployed (provides NCBI SSM + Secrets Manager)
-#   - cloudformation/ecr.yaml deployed (provides pipeline image repository)
+#   - etl/cloudformation/fetch.yaml deployed (provides NCBI SSM + Secrets Manager)
+#   - etl/cloudformation/ecr.yaml deployed (provides pipeline image repository)
 #   - Pipeline image pushed to ECR
 #   - Private subnets with NAT gateway (job needs GitHub, NCBI, CELLxGENE, S3)
+#   - shared/cloudformation/shared-resources.yaml deployed (provides the
+#     ArangoDB dataset bucket, mirrored to SSM at S3Bucket below)
 #
 # Deploy:
 #   aws cloudformation deploy \
-#     --template-file cloudformation/batch.yaml \
+#     --template-file etl/cloudformation/batch.yaml \
 #     --stack-name nlm-ckn-etl-batch \
 #     --capabilities CAPABILITY_NAMED_IAM \
 #     --parameter-overrides \
-#         S3Bucket=<bucket> \
+#         ProjectName=nlm-ckn \
 #         EcrImageUri=<account>.dkr.ecr.<region>.amazonaws.com/nlm-ckn-etl-pipeline:latest \
 #         NcbiApiKeySecretArn=<arn> \
 #         VpcId=vpc-<id> \
 #         SubnetIds=subnet-<a>,subnet-<b>
+#
+#   S3Bucket resolves from SSM at deploy time — do not pass a literal bucket
+#   name via --parameter-overrides. Override the Default below (its value is
+#   an SSM parameter *name*, not a bucket name) if ProjectName changes.
 
 Parameters:
 
-  S3Bucket:
+  ProjectName:
     Type: String
-    Description: S3 bucket for external cache, baseline dumps, and run artifacts.
+    Description: >
+      Project namespace — single source of truth for resource names, IAM
+      resource ARNs, and the Project tag (ADR 0002). Required (no default): the
+      deploy scripts pass it from deploy/lib/common.sh so the value is set once
+      for the whole repo (shared with the fetch/ecr/github-oidc stacks, which
+      reference these names cross-stack).
+
+  Owner:
+    Type: String
+    Default: springbok
+    Description: >
+      Owning team or contact, applied as the Owner tag (ADR 0004). Set this to
+      the real owning team/distribution list.
+
+  S3Bucket:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /nlm-ckn/shared/arangodb-bucket-name
+    Description: >
+      S3 bucket for external cache, baseline dumps, and run artifacts. This
+      parameter's value is an SSM parameter name (kept up to date by
+      deploy/01-deploy-account-setup.sh whenever
+      shared/cloudformation/shared-resources.yaml is deployed); CloudFormation
+      resolves it to the live bucket name at deploy time. If ProjectName
+      changes, override this Default to /<project>/shared/arangodb-bucket-name.
+
 
   EcrImageUri:
     Type: String
@@ -52,7 +82,9 @@ Parameters:
   NcbiEmailParameterName:
     Type: String
     Default: /nlm-ckn/ncbi-email
-    Description: SSM parameter name for the NCBI email (created by fetch.yaml).
+    Description: >
+      SSM parameter name for the NCBI email (created by fetch.yaml). If
+      ProjectName changes, update this to /<project>/ncbi-email.
 
   VpcId:
     Type: AWS::EC2::VPC::Id
@@ -107,8 +139,19 @@ Resources:
   ReleaseLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: /batch/nlm-ckn-release
+      LogGroupName: !Sub '/batch/${ProjectName}-release'
       RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── Networking ────────────────────────────────────────────────────────────────
 
@@ -135,9 +178,17 @@ Resources:
           Description: Allow DNS outbound (TCP fallback)
       Tags:
         - Key: Name
-          Value: nlm-ckn-release
+          Value: !Sub '${ProjectName}-release'
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── IAM: Batch service role ───────────────────────────────────────────────────
   # Used by AWS Batch itself to manage EC2 instances and ECS resources.
@@ -145,7 +196,7 @@ Resources:
   BatchServiceRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: nlm-ckn-release-batch-service-role
+      RoleName: !Sub '${ProjectName}-release-batch-service-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -157,7 +208,15 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
       Tags:
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── IAM: EC2 instance role ────────────────────────────────────────────────────
   # Assumed by the EC2 instances in the compute environment so the ECS container
@@ -166,7 +225,7 @@ Resources:
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: nlm-ckn-release-instance-role
+      RoleName: !Sub '${ProjectName}-release-instance-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -178,7 +237,15 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
       Tags:
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -192,7 +259,7 @@ Resources:
   JobExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: nlm-ckn-release-job-execution-role
+      RoleName: !Sub '${ProjectName}-release-job-execution-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -210,7 +277,7 @@ Resources:
               - Sid: ReadSsmParameters
                 Effect: Allow
                 Action: ssm:GetParameters
-                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/nlm-ckn/*'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/*'
               - Sid: ReadApiKeySecret
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
@@ -224,7 +291,15 @@ Resources:
                 - !Ref AWS::NoValue
       Tags:
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── IAM: Job role ─────────────────────────────────────────────────────────────
   # Runtime permissions for application code inside the release container.
@@ -232,7 +307,7 @@ Resources:
   JobRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: nlm-ckn-release-job-role
+      RoleName: !Sub '${ProjectName}-release-job-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -254,7 +329,6 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                  - s3:CopyObject
                   - s3:DeleteObject
                 Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
         - PolicyName: ReadNcbiCredentials
@@ -264,14 +338,22 @@ Resources:
               - Sid: ReadSsmParameters
                 Effect: Allow
                 Action: ssm:GetParameters
-                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/nlm-ckn/*'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/*'
               - Sid: ReadApiKeySecret
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Ref NcbiApiKeySecretArn
       Tags:
         - Key: Project
-          Value: nlm-ckn
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: etl
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ── Launch template: expand EBS root volume ───────────────────────────────────
   # The default Amazon ECS-optimized AMI ships with a 30 GiB root volume, which
@@ -280,7 +362,7 @@ Resources:
   InstanceLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
-      LaunchTemplateName: nlm-ckn-release-lt
+      LaunchTemplateName: !Sub '${ProjectName}-release-lt'
       LaunchTemplateData:
         MetadataOptions:
           HttpTokens: required
@@ -297,7 +379,7 @@ Resources:
   ComputeEnvironment:
     Type: AWS::Batch::ComputeEnvironment
     Properties:
-      ComputeEnvironmentName: nlm-ckn-release
+      ComputeEnvironmentName: !Sub '${ProjectName}-release'
       Type: MANAGED
       State: ENABLED
       ServiceRole: !GetAtt BatchServiceRole.Arn
@@ -315,23 +397,35 @@ Resources:
         LaunchTemplate:
           LaunchTemplateId: !Ref InstanceLaunchTemplate
         Tags:
-          Project: nlm-ckn
+          Project: !Ref ProjectName
+          Component: etl
+          Owner: !Ref Owner
+          ManagedBy: CloudFormation
+          Repository: nlm-ckn-iac
       Tags:
-        Project: nlm-ckn
+        Project: !Ref ProjectName
+        Component: etl
+        Owner: !Ref Owner
+        ManagedBy: CloudFormation
+        Repository: nlm-ckn-iac
 
   # ── Batch: Job Queue ──────────────────────────────────────────────────────────
 
   JobQueue:
     Type: AWS::Batch::JobQueue
     Properties:
-      JobQueueName: nlm-ckn-release
+      JobQueueName: !Sub '${ProjectName}-release'
       State: ENABLED
       Priority: 10
       ComputeEnvironmentOrder:
         - Order: 1
           ComputeEnvironment: !Ref ComputeEnvironment
       Tags:
-        Project: nlm-ckn
+        Project: !Ref ProjectName
+        Component: etl
+        Owner: !Ref Owner
+        ManagedBy: CloudFormation
+        Repository: nlm-ckn-iac
 
   # ── Batch: Job Definition ─────────────────────────────────────────────────────
   #
@@ -344,8 +438,10 @@ Resources:
   JobDefinition:
     Type: AWS::Batch::JobDefinition
     Properties:
-      JobDefinitionName: nlm-ckn-release
+      JobDefinitionName: !Sub '${ProjectName}-release'
       Type: container
+      # Propagate the job-definition tags onto the ECS task Batch launches.
+      PropagateTags: true
       PlatformCapabilities:
         - EC2
       RetryStrategy:
@@ -390,13 +486,17 @@ Resources:
             awslogs-region: !Ref AWS::Region
             awslogs-stream-prefix: release
       Tags:
-        Project: nlm-ckn
+        Project: !Ref ProjectName
+        Component: etl
+        Owner: !Ref Owner
+        ManagedBy: CloudFormation
+        Repository: nlm-ckn-iac
 
 Outputs:
 
   JobQueueName:
     Value: !Ref JobQueue
-    Description: Batch job queue name (nlm-ckn-release).
+    Description: Batch job queue name (<project>-release).
 
   JobDefinitionArn:
     Value: !Ref JobDefinition
@@ -404,7 +504,7 @@ Outputs:
 
   LogGroupName:
     Value: !Ref ReleaseLogGroup
-    Description: CloudWatch log group for release job output (/batch/nlm-ckn-release).
+    Description: CloudWatch log group for release job output (/batch/<project>-release).
 
   ComputeEnvironmentArn:
     Value: !Ref ComputeEnvironment

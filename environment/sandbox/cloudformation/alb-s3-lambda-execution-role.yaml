@@ -1,0 +1,66 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: IAM role for Lambda to read S3 content and write CloudWatch Logs
+
+Parameters:
+  pProjectName:
+    Type: String
+
+  pEnvironment:
+    Type: String
+
+  pRoleName:
+    Type: String
+    Default: alb-s3-content-lambda-role
+
+Resources:
+  rLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${pProjectName}-${pEnvironment}-${pRoleName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LambdaAssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${pProjectName}-${pEnvironment}-lambda-logs-and-s3-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+              - Sid: S3ReadObject
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:aws:s3:::${pProjectName}-${pEnvironment}-frontend/*
+
+              - Sid: S3ListBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${pProjectName}-${pEnvironment}-frontend
+
+Outputs:
+  oLambdaExecutionRoleArn:
+    Description: ARN of the Lambda execution role
+    Value: !GetAtt rLambdaExecutionRole.Arn
+    Export:
+      Name: !Sub ${pProjectName}-${pEnvironment}-oLambdaExecutionRoleArn
+
+  oLambdaExecutionRoleName:
+    Description: Name of the Lambda execution role
+    Value: !Ref rLambdaExecutionRole
+    Export:
+      Name: !Sub ${pProjectName}-${pEnvironment}-oLambdaExecutionRoleName
