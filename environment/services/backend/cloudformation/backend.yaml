@@ -312,6 +312,10 @@ Resources:
         Fn::Sub: '${ProjectName}-${Environment}-cluster-name'
       TaskDefinition: !Ref TaskDefinition
       LaunchType: FARGATE
+      # Propagate the service's tags (Project/Environment/Owner/ManagedBy/
+      # Repository) onto the tasks and their ENIs; ADR 0004 tag-based identity.
+      PropagateTags: SERVICE
+      EnableECSManagedTags: true
       DesiredCount: 2
       NetworkConfiguration:
         AwsvpcConfiguration:

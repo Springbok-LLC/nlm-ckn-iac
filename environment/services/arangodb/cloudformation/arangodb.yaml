@@ -378,6 +378,49 @@ Resources:
           Value: nlm-ckn-iac
 
   # ============================================================================
+  # Launch Template
+  #
+  # Carries TagSpecifications so the instance's root volume is tagged at launch.
+  # AWS::EC2::Instance cannot tag its block-device volumes directly, so a launch
+  # template is the declarative mechanism. It intentionally holds ONLY tag
+  # specifications — every other instance setting stays on the instance resource.
+  # No explicit LaunchTemplateName (ADR 0003: auto-generated names on new
+  # resources); the instance references it by logical id.
+  # ============================================================================
+  ArangoDbLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        TagSpecifications:
+          - ResourceType: volume
+            Tags:
+              - Key: Project
+                Value: !Ref ProjectName
+              - Key: Environment
+                Value: !Ref Environment
+              - Key: Name
+                Value: !Sub '${ProjectName}-${Environment}-arangodb-root'
+              - Key: ManagedBy
+                Value: CloudFormation
+              - Key: Owner
+                Value: springbok
+              - Key: Repository
+                Value: nlm-ckn-iac
+      TagSpecifications:
+        - ResourceType: launch-template
+          Tags:
+            - Key: Project
+              Value: !Ref ProjectName
+            - Key: Environment
+              Value: !Ref Environment
+            - Key: ManagedBy
+              Value: CloudFormation
+            - Key: Owner
+              Value: springbok
+            - Key: Repository
+              Value: nlm-ckn-iac
+
+  # ============================================================================
   # EC2 Instance
   #
   # Uses the latest Amazon Linux 2023 AMI (resolved at deploy time via SSM).
@@ -412,6 +455,12 @@ Resources:
         - IsSelfManaged
         - !Ref InstanceProfile
         - !Ref InstanceProfileArn
+      # Only used to carry volume TagSpecifications (see ArangoDbLaunchTemplate).
+      # Attaching a launch template REPLACES the instance on the next deploy;
+      # the ArangoDB data survives on the retained standalone DataVolume.
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ArangoDbLaunchTemplate
+        Version: !GetAtt ArangoDbLaunchTemplate.LatestVersionNumber
       BlockDeviceMappings:
         # Root volume — OS only. The ArangoDB data volume is a standalone
         # AWS::EC2::Volume (see DataVolume; attached by UserData) so it

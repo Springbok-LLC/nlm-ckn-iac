@@ -35,6 +35,7 @@ TAGGABLE_TYPES = {
     "AWS::EC2::SecurityGroup",
     "AWS::EC2::Subnet",
     "AWS::EC2::VPC",
+    "AWS::EC2::Volume",
     "AWS::ECR::Repository",
     "AWS::ECS::Cluster",
     "AWS::ECS::Service",

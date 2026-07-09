@@ -439,6 +439,8 @@ Resources:
     Properties:
       JobDefinitionName: !Sub '${ProjectName}-release'
       Type: container
+      # Propagate the job-definition tags onto the ECS task Batch launches.
+      PropagateTags: true
       PlatformCapabilities:
         - EC2
       RetryStrategy:

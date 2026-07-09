@@ -436,6 +436,9 @@ Resources:
         EcsParameters:
           TaskDefinitionArn: !Ref FetchTaskDefinition
           LaunchType: FARGATE
+          # Propagate the task-definition tags onto each scheduled task.
+          PropagateTags: TASK_DEFINITION
+          EnableECSManagedTags: true
           NetworkConfiguration:
             AwsvpcConfiguration:
               AssignPublicIp: DISABLED
