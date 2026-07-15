@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# deploy-fetch.sh — deploy the NLM-CKN fetch stack end-to-end
+# deploy-fetch.sh — deploy the NLM-CKN fetch stack.
 #
 # Steps:
-#   1. Deploy etl/cloudformation/ecr.yaml  (creates/updates nlm-ckn-ecr stack)
-#   2. Build the fetcher Docker image  (--target fetcher)
-#   3. Push the image to ECR
-#   4. Deploy etl/cloudformation/fetch.yaml (creates/updates nlm-ckn-fetch stack)
+#   1. Deploy etl/cloudformation/ecr.yaml  (creates/updates the ECR repos)
+#   2. Confirm the fetcher image tag exists in ECR (does NOT build it)
+#   3. Deploy etl/cloudformation/fetch.yaml (creates/updates nlm-ckn-etl-fetch)
+#
+# This script does NOT build or push container images. Images are built and
+# pushed by the nlm-ckn-etl repo's CI (.github/workflows/build-image.yml) into
+# the ECR repos this script provisions. If the fetcher image tag is missing at
+# step 2, the script prints copy/re-tag guidance and pauses so you can push the
+# image (in another shell), then continues when you press Enter.
 #
 # Config file (gitignored):
 #   .env  — all required values, loaded automatically if present
@@ -35,6 +40,7 @@
 #   AWS_REGION           AWS region (default: from AWS CLI config)
 #   AWS_PROFILE          AWS CLI profile (default: from environment)
 #   ECR_STACK_NAME       CloudFormation stack name for ECR (default: nlm-ckn-etl-ecr)
+#   IMAGE_TAG            Fetcher image tag to deploy (default: latest)
 #   FETCH_STACK_NAME     CloudFormation stack name for fetch (default: nlm-ckn-etl-fetch)
 #   SCHEDULE_EXPRESSION  EventBridge cron expression (default: cron(0 2 * * ? *))
 #   CKN_RUN              Run name passed to fetch.py (default: latest)
@@ -66,6 +72,7 @@ fi
 
 # ── Config ───────────────────────────────────────────────────────────────────
 ECR_STACK_NAME="${ECR_STACK_NAME:-nlm-ckn-etl-ecr}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
 FETCH_STACK_NAME="${FETCH_STACK_NAME:-nlm-ckn-etl-fetch}"
 SCHEDULE_EXPRESSION="${SCHEDULE_EXPRESSION:-cron(0 2 * * ? *)}"
 CKN_RUN="${CKN_RUN:-latest}"
@@ -102,6 +109,8 @@ REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/nu
 export AWS_DEFAULT_REGION="${REGION}"
 
 # ── Step 1: Deploy ECR stack ─────────────────────────────────────────────────
+# Provisions the ECR repos (idempotent, no Docker). Images themselves are pushed
+# by the nlm-ckn-etl repo's CI, not here.
 log "Deploying ECR stack (${ECR_STACK_NAME})..."
 aws cloudformation deploy \
   --template-file "${REPO_ROOT}/etl/cloudformation/ecr.yaml" \
@@ -112,33 +121,18 @@ aws cloudformation deploy \
 
 log "ECR stack ready."
 
-# ── Step 2: Resolve ECR details ──────────────────────────────────────────────
+# ── Step 2: Confirm the fetcher image tag exists (no build) ──────────────────
 FETCHER_REPO_URI="$(cfn_output "${ECR_STACK_NAME}" FetcherRepositoryUri)"
-if [[ -z "${FETCHER_REPO_URI}" ]]; then
-  echo "ERROR: CloudFormation output FetcherRepositoryUri not found in stack ${ECR_STACK_NAME}" >&2
+FETCHER_REPO_NAME="$(cfn_output "${ECR_STACK_NAME}" FetcherRepositoryName)"
+if [[ -z "${FETCHER_REPO_URI}" || -z "${FETCHER_REPO_NAME}" ]]; then
+  echo "ERROR: CloudFormation outputs Fetcher{RepositoryUri,RepositoryName} not found in stack ${ECR_STACK_NAME}" >&2
   exit 1
 fi
-REGISTRY="${FETCHER_REPO_URI%%/*}"   # account.dkr.ecr.region.amazonaws.com
 
-log "Fetcher ECR URI: ${FETCHER_REPO_URI}"
+log "Fetcher ECR URI: ${FETCHER_REPO_URI}:${IMAGE_TAG}"
+wait_for_ecr_image "${FETCHER_REPO_NAME}" "${IMAGE_TAG}" "${REGION}"
 
-# ── Step 3: Build fetcher image ───────────────────────────────────────────────
-log "Building fetcher image (--target fetcher)..."
-docker build \
-  --platform linux/amd64 \
-  --target fetcher \
-  -t "${FETCHER_REPO_URI}:latest" \
-  "${REPO_ROOT}"
-
-# ── Step 4: Push to ECR ───────────────────────────────────────────────────────
-log "Logging in to ECR (${REGISTRY})..."
-aws ecr get-login-password --region "${REGION}" \
-  | docker login --username AWS --password-stdin "${REGISTRY}"
-
-log "Pushing fetcher image..."
-docker push "${FETCHER_REPO_URI}:latest"
-
-# ── Step 5: Deploy fetch stack ────────────────────────────────────────────────
+# ── Step 3: Deploy fetch stack ────────────────────────────────────────────────
 log "Deploying fetch stack (${FETCH_STACK_NAME})..."
 aws cloudformation deploy \
   --template-file "${REPO_ROOT}/etl/cloudformation/fetch.yaml" \
@@ -148,7 +142,7 @@ aws cloudformation deploy \
   --parameter-overrides \
     ProjectName="${PROJECT_NAME}" \
     S3Bucket="${S3_BUCKET_SSM_PARAM}" \
-    EcrImageUri="${FETCHER_REPO_URI}:latest" \
+    EcrImageUri="${FETCHER_REPO_URI}:${IMAGE_TAG}" \
     NcbiEmail="${NCBI_EMAIL}" \
     NcbiApiKey="${NCBI_API_KEY}" \
     VpcId="${VPC_ID}" \
