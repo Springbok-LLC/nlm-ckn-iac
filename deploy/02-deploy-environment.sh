@@ -35,6 +35,10 @@
 #   --services-only   Deploy only the service (phase 2) stacks
 #   --cdn-only        Deploy only the frontend CDN (phase 3) stack (cutover step)
 #   --with-cdn        Also deploy the frontend CDN (phase 3) stack after services
+#   --attach-alias    Deploy the CDN stack with the domain alias + Route53 record
+#                     attached (AttachAlias=true). Omit for the first, alias-less
+#                     deploy; add it at cutover once the alias has been moved here
+#                     with associate-alias. Normally driven by cutover-frontend-cdn.sh.
 #   --auto-approve    Skip confirmation prompts (useful for CI/CD pipelines)
 #   (default: deploy phase 1 + 2, SKIP phase 3, prompt before each changeset)
 #
@@ -66,14 +70,16 @@ ENVIRONMENT=$1
 DEPLOY_MODE=""
 AUTO_APPROVE=false
 DEPLOY_CDN=false
+ATTACH_ALIAS=false
 
 for arg in "${@:2}"; do
   case "$arg" in
     --infra-only|--services-only|--cdn-only) DEPLOY_MODE="$arg" ;;
     --with-cdn) DEPLOY_CDN=true ;;
+    --attach-alias) ATTACH_ALIAS=true ;;
     --auto-approve) AUTO_APPROVE=true ;;
     *) echo -e "${RED}Error: Unknown option: $arg${NC}"
-       echo "Valid options: --infra-only, --services-only, --cdn-only, --with-cdn, --auto-approve"
+       echo "Valid options: --infra-only, --services-only, --cdn-only, --with-cdn, --attach-alias, --auto-approve"
        exit 1 ;;
   esac
 done
@@ -661,9 +667,13 @@ if [ "$DEPLOY_MODE" = "--cdn-only" ] || { [ "$DEPLOY_CDN" = true ] && [ "$DEPLOY
   echo -e "${YELLOW}=======================================${NC}"
   echo ""
 
+  # AttachAlias=false stands the distribution up alias-less (side by side with an
+  # existing environment); --attach-alias flips it on at cutover, after
+  # associate-alias has moved the domain alias here (see cutover-frontend-cdn.sh).
   CDN_PARAMS_FILE=$(make_params_file \
     ProjectName "$PROJECT_NAME" \
-    Environment "$ENVIRONMENT")
+    Environment "$ENVIRONMENT" \
+    AttachAlias "$ATTACH_ALIAS")
 
   CDN_RESULT=0
   deploy_stack \
