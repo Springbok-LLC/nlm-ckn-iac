@@ -185,7 +185,34 @@ deploy_stack() {
   if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ] || [ "$STACK_STATUS" = "REVIEW_IN_PROGRESS" ]; then
     local CHANGESET_TYPE="CREATE"
   elif [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STACK_STATUS" = "CREATE_FAILED" ]; then
-    # Stack failed and rolled back (or was left in CREATE_FAILED). Must be deleted before recreating.
+    # Stack failed and rolled back (or was left in CREATE_FAILED). Normally we
+    # delete and recreate. GUARD: the frontend-cdn stack owns a live CloudFront
+    # distribution + the domain's DNS, so silently deleting it mid-cutover tears
+    # the distribution down and orphans the record — an environment outage (this
+    # is exactly what bit the dev cutover). For that stack, require an explicit
+    # typed confirmation and never auto-delete it non-interactively.
+    if [[ "$STACK_NAME" == *-frontend-cdn ]]; then
+      local LIVE_DIST reply
+      LIVE_DIST=$(aws cloudformation describe-stacks \
+        --stack-name "$STACK_NAME" --region $AWS_REGION \
+        --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+        --output text 2>/dev/null || echo "")
+      echo -e "${RED}  ⚠  ${STACK_NAME} is in ${STACK_STATUS}, and it owns the CloudFront${NC}"
+      echo -e "${RED}     distribution + the domain's DNS. Deleting it tears down the${NC}"
+      echo -e "${RED}     distribution${LIVE_DIST:+ ($LIVE_DIST)} and takes the domain offline.${NC}"
+      echo -e "${YELLOW}     Investigate the rollback cause first. If you are certain no live${NC}"
+      echo -e "${YELLOW}     traffic depends on it, delete manually, then re-run:${NC}"
+      echo "       aws cloudformation delete-stack --stack-name ${STACK_NAME} --region ${AWS_REGION}"
+      if [ "$AUTO_APPROVE" = true ]; then
+        echo -e "${RED}  Refusing to auto-delete a frontend-cdn stack with --auto-approve.${NC}"
+        return 1
+      fi
+      read -r -p "  Type the stack name to delete + recreate it, or anything else to abort: " reply
+      if [ "$reply" != "$STACK_NAME" ]; then
+        echo -e "${YELLOW}  Aborted — stack left untouched.${NC}"
+        return 1
+      fi
+    fi
     echo -e "${YELLOW}  Stack ${STACK_NAME} is in ${STACK_STATUS}. Deleting before recreating...${NC}"
     aws cloudformation delete-stack --stack-name "$STACK_NAME" --region $AWS_REGION
     echo -e "${YELLOW}  Waiting for deletion...${NC}"
