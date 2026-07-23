@@ -9,6 +9,13 @@ Description: >
 # EC2 launch type is required — Fargate cannot mount /var/run/docker.sock, which
 # release.py needs to start the ArangoDB sibling container via the Docker SDK.
 #
+# Logs are routed through a host log-router daemon (AWS for Fluent Bit) rather
+# than shipped to CloudWatch line-by-line: the job's Docker fluentd driver
+# forwards output to the daemon (started from the launch-template UserData),
+# whose multiline filter reassembles Java/Python stack traces into single
+# CloudWatch events. FireLens (the usual sidecar router) is not available to
+# AWS Batch job definitions, so the router runs as a per-instance host daemon.
+#
 # NCBI credentials are shared with the fetch stack: NCBI_EMAIL is read from the
 # SSM parameter /<project>/ncbi-email and NCBI_API_KEY from Secrets Manager at
 # NcbiApiKeySecretArn (both created by etl/cloudformation/fetch.yaml).
@@ -119,6 +126,16 @@ Parameters:
       EBS root volume size (GiB) for compute instances. Needs to hold the
       ArangoDB data directory, baseline/golden dumps, OBO files, and tuple output.
 
+  FluentBitImage:
+    Type: String
+    Default: public.ecr.aws/aws-observability/aws-for-fluent-bit:stable
+    Description: >
+      Container image for the host log-router daemon (AWS for Fluent Bit). Run on
+      each compute instance via the launch template to reassemble multi-line
+      Java/Python stack traces into single CloudWatch events before shipping them
+      to the release log group. Pin to a specific tag (e.g. 2.32.x) instead of
+      'stable' for reproducible builds.
+
   GithubTokenSecretArn:
     Type: String
     Default: ''
@@ -135,6 +152,9 @@ Conditions:
 Resources:
 
   # ── Logging ───────────────────────────────────────────────────────────────────
+  # The job does not log to CloudWatch directly. Its Docker fluentd driver hands
+  # stdout/stderr to a host AWS-for-Fluent-Bit daemon (see InstanceLaunchTemplate)
+  # that reassembles multi-line Java/Python stack traces, then writes them here.
 
   ReleaseLogGroup:
     Type: AWS::Logs::LogGroup
@@ -235,6 +255,24 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      Policies:
+        # The host Fluent Bit daemon runs under the instance profile and writes
+        # the reassembled log events to the release log group via the
+        # cloudwatch_logs output (auto_create_group is off — the group is
+        # created by ReleaseLogGroup below, so only stream/put rights are needed).
+        - PolicyName: FluentBitCloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteReleaseLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !GetAtt ReleaseLogGroup.Arn
+                  - !Sub '${ReleaseLogGroup.Arn}:*'
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -355,9 +393,20 @@ Resources:
         - Key: Repository
           Value: nlm-ckn-iac
 
-  # ── Launch template: expand EBS root volume ───────────────────────────────────
+  # ── Launch template: expand EBS root volume + log-router daemon ───────────────
   # The default Amazon ECS-optimized AMI ships with a 30 GiB root volume, which
   # is too small for ArangoDB dumps, OBO files, and tuple output combined.
+  #
+  # UserData (MIME multipart so the AMI's own ECS bootstrap still runs) does two
+  # things on each compute instance:
+  #   1. Enables the Docker `fluentd` logging driver in the ECS agent config, so
+  #      the release job can route its stdout/stderr to the host daemon instead
+  #      of straight to CloudWatch.
+  #   2. Starts AWS for Fluent Bit as a restart=always host daemon listening on
+  #      the Docker forward protocol (127.0.0.1:24224). Its multiline filter
+  #      reassembles Java/Python stack traces into single events, then the
+  #      cloudwatch_logs output ships them to ReleaseLogGroup. The daemon writes
+  #      under the instance profile (see InstanceRole's FluentBitCloudWatchLogs).
 
   InstanceLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
@@ -373,6 +422,63 @@ Resources:
               VolumeSize: !Ref EbsVolumeGiB
               VolumeType: gp3
               DeleteOnTermination: true
+        UserData:
+          Fn::Base64:
+            !Sub |
+              MIME-Version: 1.0
+              Content-Type: multipart/mixed; boundary="==BATCH-BOUNDARY=="
+
+              --==BATCH-BOUNDARY==
+              Content-Type: text/x-shellscript; charset="us-ascii"
+
+              #!/bin/bash
+              set -euo pipefail
+
+              # 1. Allow the fluentd Docker logging driver for Batch/ECS tasks on
+              #    this host (read by the ECS agent at start-up).
+              grep -q ECS_AVAILABLE_LOGGING_DRIVERS /etc/ecs/ecs.config 2>/dev/null || \
+                echo 'ECS_AVAILABLE_LOGGING_DRIVERS=["json-file","awslogs","fluentd"]' >> /etc/ecs/ecs.config
+
+              # 2. Fluent Bit config: forward input receives the job's logs from the
+              #    Docker fluentd driver; the multiline filter concatenates
+              #    java/python stack traces (both parsers are built into the image);
+              #    cloudwatch_logs ships the reassembled events to the release group.
+              mkdir -p /etc/fluent-bit
+              cat > /etc/fluent-bit/fluent-bit.conf <<'FBCONF'
+              [SERVICE]
+                  Flush        5
+                  Grace        30
+                  Log_Level    info
+
+              [INPUT]
+                  Name             forward
+                  Listen           127.0.0.1
+                  Port             24224
+
+              [FILTER]
+                  Name                  multiline
+                  Match                 *
+                  multiline.key_content log
+                  multiline.parser      java,python
+
+              [OUTPUT]
+                  Name              cloudwatch_logs
+                  Match             *
+                  region            ${AWS::Region}
+                  log_group_name    ${ReleaseLogGroup}
+                  log_stream_prefix release/
+                  auto_create_group false
+              FBCONF
+
+              # 3. Run the log router as a host daemon (survives crashes/reboots).
+              #    Mount only the main config over the image default so the built-in
+              #    parsers stay intact; host networking binds 127.0.0.1:24224.
+              systemctl enable --now docker
+              docker rm -f fluent-bit >/dev/null 2>&1 || true
+              docker run -d --name fluent-bit --restart always --network host \
+                -v /etc/fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro \
+                ${FluentBitImage}
+              --==BATCH-BOUNDARY==--
 
   # ── Batch: Compute Environment ────────────────────────────────────────────────
 
@@ -479,12 +585,17 @@ Resources:
           - ContainerPath: /var/run/docker.sock
             SourceVolume: docker-socket
             ReadOnly: false
+        # Route stdout/stderr to the host Fluent Bit daemon (launch template
+        # UserData) instead of straight to CloudWatch, so multi-line stack traces
+        # are reassembled before delivery. fluentd-async keeps container start-up
+        # from blocking (and lets it reconnect) if the daemon is briefly down;
+        # the tag becomes the CloudWatch stream suffix (release/<container-id>).
         LogConfiguration:
-          LogDriver: awslogs
+          LogDriver: fluentd
           Options:
-            awslogs-group: !Ref ReleaseLogGroup
-            awslogs-region: !Ref AWS::Region
-            awslogs-stream-prefix: release
+            fluentd-address: 127.0.0.1:24224
+            fluentd-async: 'true'
+            tag: '{{.ID}}'
       Tags:
         Project: !Ref ProjectName
         Component: etl
