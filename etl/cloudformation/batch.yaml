@@ -15,8 +15,8 @@ Description: >
 # — whose multiline filter would reassemble Java/Python stack traces into single
 # CloudWatch events — is provisioned by the launch-template UserData for later
 # validation and cutover, but it stays INACTIVE until the job switches its log
-# driver to fluentd. FireLens (the usual sidecar router) is not available to
-# AWS Batch job definitions, which is why the router is a per-instance host daemon.
+# driver to fluentd. This stack intentionally runs Fluent Bit as a per-instance
+# host daemon rather than configuring FireLens in the job definition.
 #
 # NCBI credentials are shared with the fetch stack: NCBI_EMAIL is read from the
 # SSM parameter /<project>/ncbi-email and NCBI_API_KEY from Secrets Manager at
@@ -451,6 +451,12 @@ Resources:
               else
                 echo 'ECS_AVAILABLE_LOGGING_DRIVERS=["json-file","awslogs","fluentd"]' >> /etc/ecs/ecs.config
               fi
+
+              # The ECS agent reads ECS_AVAILABLE_LOGGING_DRIVERS only at start-up
+              # and caches it, so restart it now to register fluentd before any
+              # task cutover (a no-op driver list change is picked up next boot
+              # otherwise). Safe here: the agent starts (or restarts) cleanly.
+              systemctl restart ecs
 
               # 2. Fluent Bit config: forward input receives the job's logs from the
               #    Docker fluentd driver; the multiline filter concatenates
