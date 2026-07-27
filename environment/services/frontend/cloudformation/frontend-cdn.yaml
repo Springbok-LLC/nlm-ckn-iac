@@ -39,6 +39,28 @@ Parameters:
       with `aws cloudfront associate-alias`, then redeploy with 'true' to attach
       the alias here and repoint DNS. See deploy/cutover-frontend-cdn.sh.
 
+  ApiRateLimitPer5Min:
+    Type: Number
+    Default: 3000
+    MinValue: 100
+    Description: >-
+      Max requests allowed per client IP to /arango_api/* within a 5-minute
+      sliding window before WAF blocks that IP (until it drops back under the
+      limit). Tune to your real API traffic.
+
+  ManagedRulesMode:
+    Type: String
+    Default: Count
+    AllowedValues:
+      - Count
+      - Block
+    Description: >-
+      Enforcement mode for the AWS managed rule groups (Common + KnownBadInputs).
+      Count = monitor only: matches are logged/counted but never blocked.
+      Block = enforce. Start with Count, review sampled requests in the WAF
+      console, then switch to Block once you've confirmed no false positives on
+      legitimate API traffic (large AQL POST bodies can trip the size rules).
+
   # All other inputs come from cross-stack imports:
   #   Frontend bucket   → ${ProjectName}-${Environment}-frontend-bucket        (frontend.yaml)
   #   Frontend bucket domain → ${ProjectName}-${Environment}-frontend-bucket-domain (frontend.yaml)
@@ -66,6 +88,8 @@ Conditions:
   # Gates the domain alias on the distribution and the Route53 record — the two
   # globally-unique resources that collide at cutover (see AttachAlias).
   ShouldAttachAlias: !Equals [!Ref AttachAlias, 'true']
+  # Enforce (block) vs monitor (count) for the managed WAF rule groups.
+  BlockManagedRules: !Equals [!Ref ManagedRulesMode, 'Block']
 
 Resources:
   # ============================================================================
@@ -139,6 +163,9 @@ Resources:
         Enabled: true
         HttpVersion: http2and3
         IPV6Enabled: true
+        # AWS WAF Web ACL (rate limiting + managed rule groups). CLOUDFRONT-scope
+        # WebACLs live in us-east-1, same as this stack.
+        WebACLId: !GetAtt CloudFrontWebACL.Arn
         Comment: !Sub '${ProjectName} ${Environment} frontend'
         # Omitted on the first (alias-less) deploy so the distribution doesn't
         # collide with the existing environment's alias; attached at cutover via
@@ -178,18 +205,11 @@ Resources:
               - HeaderName: X-Custom-Origin-Header
                 HeaderValue: !Sub '{{resolve:secretsmanager:/${ProjectName}/${Environment}/secrets/cloudfront-secret:SecretString}}'
 
-          # ALB Origin for ArangoDB web UI (port 8529)
-          - Id: ArangoDbOrigin
-            DomainName: !ImportValue
-              Fn::Sub: '${ProjectName}-${Environment}-alb-dns'
-            CustomOriginConfig:
-              HTTPSPort: 8529
-              OriginProtocolPolicy: https-only
-              OriginSSLProtocols:
-                - TLSv1.2
-            OriginCustomHeaders:
-              - HeaderName: X-Custom-Origin-Header
-                HeaderValue: !Sub '{{resolve:secretsmanager:/${ProjectName}/${Environment}/secrets/cloudfront-secret:SecretString}}'
+          # NOTE: The ArangoDB origin (ALB port 8529) and its /_db/*, /_api/*,
+          # /_admin/* cache behaviors were removed — the frontend never calls
+          # ArangoDB directly (it goes through /arango_api/), so the DB admin UI
+          # and REST API are no longer publicly routable via CloudFront. Reach
+          # ArangoDB over VPN/bastion into the VPC (SG allows 8529 VPC-internal).
 
         # Default behavior (S3)
         DefaultCacheBehavior:
@@ -210,61 +230,6 @@ Resources:
           # Backend API
           - PathPattern: /arango_api/*
             TargetOriginId: ALBOrigin
-            ViewerProtocolPolicy: redirect-to-https
-            AllowedMethods:
-              - GET
-              - HEAD
-              - OPTIONS
-              - PUT
-              - POST
-              - PATCH
-              - DELETE
-            CachedMethods:
-              - GET
-              - HEAD
-            Compress: true
-            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # Managed-CachingDisabled
-            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # Managed-AllViewer
-
-          # ArangoDB web UI and REST API paths
-          - PathPattern: /_db/*
-            TargetOriginId: ArangoDbOrigin
-            ViewerProtocolPolicy: redirect-to-https
-            AllowedMethods:
-              - GET
-              - HEAD
-              - OPTIONS
-              - PUT
-              - POST
-              - PATCH
-              - DELETE
-            CachedMethods:
-              - GET
-              - HEAD
-            Compress: true
-            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # Managed-CachingDisabled
-            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # Managed-AllViewer
-
-          - PathPattern: /_api/*
-            TargetOriginId: ArangoDbOrigin
-            OriginRequestPolicyId: !Ref ArangoDbOriginRequestPolicy
-            ViewerProtocolPolicy: redirect-to-https
-            AllowedMethods:
-              - GET
-              - HEAD
-              - OPTIONS
-              - PUT
-              - POST
-              - PATCH
-              - DELETE
-            CachedMethods:
-              - GET
-              - HEAD
-            Compress: true
-            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # Managed-CachingDisabled
-
-          - PathPattern: /_admin/*
-            TargetOriginId: ArangoDbOrigin
             ViewerProtocolPolicy: redirect-to-https
             AllowedMethods:
               - GET
@@ -315,23 +280,98 @@ Resources:
           Value: nlm-ckn-iac
 
   # ============================================================================
-  # CloudFront OriginRequestPolicy
+  # AWS WAF Web ACL  (scope: CLOUDFRONT — must be created in us-east-1)
+  #
+  # Attached to the distribution via WebACLId. Layers:
+  #   1. ApiRateLimit — per-IP rate limit scoped to /arango_api/*, the only
+  #      dynamic origin left after the direct ArangoDB paths were removed.
+  #      Always enforced (blocks a flooding IP). Static S3 asset fetches are
+  #      not counted, so it won't trip on normal page loads.
+  #   2. AWS managed rule groups (Common + KnownBadInputs) for baseline
+  #      protection against common web exploits and known-bad signatures.
+  #      Default to Count (monitor) via ManagedRulesMode so a first deploy can't
+  #      break legitimate API traffic; flip to Block after reviewing samples.
   # ============================================================================
-  ArangoDbOriginRequestPolicy:
-      Type: AWS::CloudFront::OriginRequestPolicy
-      Properties:
-        OriginRequestPolicyConfig:
-          Name: !Sub '${ProjectName}-${Environment}-arangodb-policy'
-          Comment: 'Forwards Host header for ArangoDB redirects'
-          HeadersConfig:
-            HeaderBehavior: whitelist
-            Headers:
-              - Host
-              - X-Forwarded-Host
-          CookiesConfig:
-            CookieBehavior: all
-          QueryStringsConfig:
-            QueryStringBehavior: all
+  CloudFrontWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-cloudfront-waf'
+      Scope: CLOUDFRONT
+      Description: !Sub 'WAF for ${ProjectName} ${Environment} CloudFront distribution'
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub '${ProjectName}-${Environment}-cloudfront-waf'
+      Rules:
+        # Per-IP rate limit on the backend API path. An IP that exceeds the
+        # limit within the trailing 5-minute window is blocked until it drops
+        # back under. Scope-down restricts counting to /arango_api/* requests.
+        - Name: ApiRateLimit
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref ApiRateLimitPer5Min
+              AggregateKeyType: IP
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch:
+                    UriPath: {}
+                  PositionalConstraint: STARTS_WITH
+                  SearchString: /arango_api/
+                  TextTransformations:
+                    - Priority: 0
+                      Type: NONE
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub '${ProjectName}-${Environment}-api-rate-limit'
+
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction: !If
+            - BlockManagedRules
+            - None: {}
+            - Count: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub '${ProjectName}-${Environment}-common-rules'
+
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 2
+          OverrideAction: !If
+            - BlockManagedRules
+            - None: {}
+            - Count: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub '${ProjectName}-${Environment}-known-bad-inputs'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-cloudfront-waf'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
 
   # ============================================================================
   # Route 53 Record — intentionally NOT managed here.
@@ -361,6 +401,12 @@ Outputs:
     Value: !GetAtt CloudFrontDistribution.DomainName
     Export:
       Name: !Sub '${ProjectName}-${Environment}-cloudfront-domain'
+
+  WebACLArn:
+    Description: ARN of the WAF Web ACL attached to the distribution
+    Value: !GetAtt CloudFrontWebACL.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-cloudfront-waf-arn'
 
   FrontendUrl:
     Description: Frontend URL
