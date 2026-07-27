@@ -9,12 +9,14 @@ Description: >
 # EC2 launch type is required — Fargate cannot mount /var/run/docker.sock, which
 # release.py needs to start the ArangoDB sibling container via the Docker SDK.
 #
-# Logs are routed through a host log-router daemon (AWS for Fluent Bit) rather
-# than shipped to CloudWatch line-by-line: the job's Docker fluentd driver
-# forwards output to the daemon (started from the launch-template UserData),
-# whose multiline filter reassembles Java/Python stack traces into single
-# CloudWatch events. FireLens (the usual sidecar router) is not available to
-# AWS Batch job definitions, so the router runs as a per-instance host daemon.
+# Logs currently ship straight to CloudWatch: the job uses the Docker awslogs
+# driver for direct, line-by-line delivery to ReleaseLogGroup (see the job
+# definition's LogConfiguration). A host log-router daemon (AWS for Fluent Bit)
+# — whose multiline filter would reassemble Java/Python stack traces into single
+# CloudWatch events — is provisioned by the launch-template UserData for later
+# validation and cutover, but it stays INACTIVE until the job switches its log
+# driver to fluentd. FireLens (the usual sidecar router) is not available to
+# AWS Batch job definitions, which is why the router is a per-instance host daemon.
 #
 # NCBI credentials are shared with the fetch stack: NCBI_EMAIL is read from the
 # SSM parameter /<project>/ncbi-email and NCBI_API_KEY from Secrets Manager at
@@ -128,13 +130,15 @@ Parameters:
 
   FluentBitImage:
     Type: String
-    Default: public.ecr.aws/aws-observability/aws-for-fluent-bit:stable
+    Default: public.ecr.aws/aws-observability/aws-for-fluent-bit:2.34.3.20260722
     Description: >
       Container image for the host log-router daemon (AWS for Fluent Bit). Run on
       each compute instance via the launch template to reassemble multi-line
       Java/Python stack traces into single CloudWatch events before shipping them
-      to the release log group. Pin to a specific tag (e.g. 2.32.x) instead of
-      'stable' for reproducible builds.
+      to the release log group. Pinned to an immutable build tag (not the mutable
+      'stable' tag) so instance bootstrap is reproducible; override at deploy time
+      to select a newer digest/version. Bump this when moving to a newer AWS for
+      Fluent Bit release.
 
   GithubTokenSecretArn:
     Type: String
@@ -152,9 +156,11 @@ Conditions:
 Resources:
 
   # ── Logging ───────────────────────────────────────────────────────────────────
-  # The job does not log to CloudWatch directly. Its Docker fluentd driver hands
-  # stdout/stderr to a host AWS-for-Fluent-Bit daemon (see InstanceLaunchTemplate)
-  # that reassembles multi-line Java/Python stack traces, then writes them here.
+  # The job logs to CloudWatch directly via the Docker awslogs driver (see the
+  # job definition's LogConfiguration), writing to this group. The host
+  # AWS-for-Fluent-Bit daemon (see InstanceLaunchTemplate) that would reassemble
+  # multi-line Java/Python stack traces is provisioned for a later cutover and
+  # remains INACTIVE until the job switches its log driver to fluentd.
 
   ReleaseLogGroup:
     Type: AWS::Logs::LogGroup
@@ -435,9 +441,16 @@ Resources:
               set -euo pipefail
 
               # 1. Allow the fluentd Docker logging driver for Batch/ECS tasks on
-              #    this host (read by the ECS agent at start-up).
-              grep -q ECS_AVAILABLE_LOGGING_DRIVERS /etc/ecs/ecs.config 2>/dev/null || \
+              #    this host (read by the ECS agent at start-up). If the AMI
+              #    already sets ECS_AVAILABLE_LOGGING_DRIVERS, append fluentd to
+              #    the existing array (preserving json-file/awslogs) rather than
+              #    leaving it out; otherwise create the setting.
+              if grep -q '^ECS_AVAILABLE_LOGGING_DRIVERS=' /etc/ecs/ecs.config 2>/dev/null; then
+                grep -q '^ECS_AVAILABLE_LOGGING_DRIVERS=.*"fluentd"' /etc/ecs/ecs.config || \
+                  sed -i 's/^\(ECS_AVAILABLE_LOGGING_DRIVERS=\[.*\)\]/\1,"fluentd"]/' /etc/ecs/ecs.config
+              else
                 echo 'ECS_AVAILABLE_LOGGING_DRIVERS=["json-file","awslogs","fluentd"]' >> /etc/ecs/ecs.config
+              fi
 
               # 2. Fluent Bit config: forward input receives the job's logs from the
               #    Docker fluentd driver; the multiline filter concatenates
