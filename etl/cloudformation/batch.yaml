@@ -585,17 +585,26 @@ Resources:
           - ContainerPath: /var/run/docker.sock
             SourceVolume: docker-socket
             ReadOnly: false
-        # Route stdout/stderr to the host Fluent Bit daemon (launch template
-        # UserData) instead of straight to CloudWatch, so multi-line stack traces
-        # are reassembled before delivery. fluentd-async keeps container start-up
-        # from blocking (and lets it reconnect) if the daemon is briefly down;
-        # the tag becomes the CloudWatch stream suffix (release/<container-id>).
+        # Log driver: awslogs (direct to CloudWatch) while the host Fluent Bit
+        # daemon is validated. The daemon, its IAM, and the launch-template
+        # UserData remain provisioned but UNUSED until the job routes to it.
+        #
+        # To re-enable stack-trace reassembly once the daemon is confirmed
+        # delivering (a fresh stream appears under /batch/<project>-release from
+        # a test forward), swap this block back to:
+        #     LogDriver: fluentd
+        #     Options:
+        #       fluentd-address: 127.0.0.1:24224
+        #       fluentd-async: 'true'     # NOTE: silently drops logs if the
+        #                                 # daemon is down — do not re-enable
+        #                                 # until the daemon is verified.
+        #       tag: 'default/{{.ID}}'    # -> stream release/default/<container-id>
         LogConfiguration:
-          LogDriver: fluentd
+          LogDriver: awslogs
           Options:
-            fluentd-address: 127.0.0.1:24224
-            fluentd-async: 'true'
-            tag: '{{.ID}}'
+            awslogs-group: !Ref ReleaseLogGroup
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: release
       Tags:
         Project: !Ref ProjectName
         Component: etl
