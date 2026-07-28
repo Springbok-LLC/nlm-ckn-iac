@@ -300,13 +300,13 @@ Resources:
               StringLike:
                 # on-release.yml fires from a tag (refs/tags/<tag>); the
                 # manual trigger-release.yml (workflow_dispatch) fires from a
-                # branch (refs/heads/main). Both assume this role, so allow
-                # each workflow at both ref kinds.
+                # branch (refs/heads/main) only. Allow on-release at both ref
+                # kinds, but restrict trigger-release to refs/heads/main — it
+                # never runs from a tag, so a tag entry would only widen trust.
                 token.actions.githubusercontent.com:job_workflow_ref:
                   - Springbok-LLC/nlm-ckn-etl/.github/workflows/on-release.yml@refs/heads/main
                   - Springbok-LLC/nlm-ckn-etl/.github/workflows/on-release.yml@refs/tags/*
                   - Springbok-LLC/nlm-ckn-etl/.github/workflows/trigger-release.yml@refs/heads/main
-                  - Springbok-LLC/nlm-ckn-etl/.github/workflows/trigger-release.yml@refs/tags/*
                 token.actions.githubusercontent.com:sub: !Ref GitHubRepos
       Tags:
         - Key: Project
