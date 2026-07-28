@@ -154,6 +154,38 @@ Resources:
               - !Ref 'AWS::NoValue'
 
   # ============================================================================
+  # SPA routing function (viewer-request, S3 behavior only)
+  #
+  # Replaces the old distribution-wide CustomErrorResponses SPA fallback, which
+  # rewrote EVERY 403/404 — including API and WAF-blocked responses — into
+  # index.html/200 and so masked real API errors and edge blocks. This function
+  # is attached only to the S3 default behavior: extension-less paths (client-
+  # side routes) are rewritten to /index.html so the app boots and routes them,
+  # while requests for real files (with an extension) pass through and a genuine
+  # miss returns its true status. The /arango_api/* behavior has no association,
+  # so API and WAF responses keep their real status codes.
+  # ============================================================================
+  SpaRoutingFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-spa-routing'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Rewrite extension-less S3 requests to /index.html for SPA routing
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri;
+          var lastSegment = uri.substring(uri.lastIndexOf('/') + 1);
+          // No '.' in the final path segment → a client-side route, not a file.
+          if (lastSegment.indexOf('.') === -1) {
+            request.uri = '/index.html';
+          }
+          return request;
+        }
+
+  # ============================================================================
   # CloudFront Distribution
   # ============================================================================
   CloudFrontDistribution:
@@ -224,6 +256,10 @@ Resources:
             - HEAD
           Compress: true
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # Managed-CachingOptimized
+          # SPA client-side routing (S3 origin only — see SpaRoutingFunction).
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt SpaRoutingFunction.FunctionMetadata.FunctionARN
 
         # Cache behaviors (evaluated in order; most specific paths first)
         CacheBehaviors:
@@ -246,20 +282,9 @@ Resources:
             CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # Managed-CachingDisabled
             OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # Managed-AllViewer
 
-        # Custom error responses
-        # SPA client-side routing: S3+OAC returns 403 (only s3:GetObject is
-        # granted, so missing keys are AccessDenied, not NoSuchKey) and 404 for
-        # unknown paths, which we rewrite to index.html. ErrorCachingMinTTL: 0
-        # keeps a transient origin/API error from being cached and re-served.
-        CustomErrorResponses:
-          - ErrorCode: 403
-            ResponseCode: 200
-            ResponsePagePath: /index.html
-            ErrorCachingMinTTL: 0
-          - ErrorCode: 404
-            ResponseCode: 200
-            ResponsePagePath: /index.html
-            ErrorCachingMinTTL: 0
+        # SPA client-side routing is handled by SpaRoutingFunction on the S3
+        # behavior (not by distribution-wide CustomErrorResponses), so API and
+        # WAF-blocked responses keep their real status codes.
 
         # SSL/TLS certificate (from alb.yaml, shared with ALB listeners)
         ViewerCertificate:
