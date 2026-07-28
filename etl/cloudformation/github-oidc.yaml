@@ -35,7 +35,7 @@ Description: >
 #
 #   BuildRoleArn        → AWS_BUILD_ROLE_ARN          (build-image.yml — release)
 #   FetcherPushRoleArn  → AWS_FETCHER_PUSH_ROLE_ARN   (ci.yml — fetcher push)
-#   ReleaseRoleArn      → AWS_RELEASE_ROLE_ARN         (on-release.yml — Batch job)
+#   ReleaseRoleArn      → AWS_RELEASE_ROLE_ARN         (on-release.yml + trigger-release.yml — Batch job)
 #
 # Read the outputs with:
 #   aws cloudformation describe-stacks \
@@ -298,11 +298,15 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                # Releases publish from a tag, so on-release.yml runs at
-                # refs/tags/<tag>, not refs/heads/main — allow both refs.
+                # on-release.yml fires from a tag (refs/tags/<tag>); the
+                # manual trigger-release.yml (workflow_dispatch) fires from a
+                # branch (refs/heads/main) only. Allow on-release at both ref
+                # kinds, but restrict trigger-release to refs/heads/main — it
+                # never runs from a tag, so a tag entry would only widen trust.
                 token.actions.githubusercontent.com:job_workflow_ref:
                   - Springbok-LLC/nlm-ckn-etl/.github/workflows/on-release.yml@refs/heads/main
                   - Springbok-LLC/nlm-ckn-etl/.github/workflows/on-release.yml@refs/tags/*
+                  - Springbok-LLC/nlm-ckn-etl/.github/workflows/trigger-release.yml@refs/heads/main
                 token.actions.githubusercontent.com:sub: !Ref GitHubRepos
       Tags:
         - Key: Project

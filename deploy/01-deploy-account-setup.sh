@@ -31,6 +31,9 @@ source "$(dirname "$0")/lib/common.sh"
 GITHUB_ORG="Springbok-LLC"
 GITHUB_REPO="nlm-ckn-ui"
 AWS_REGION=${AWS_REGION:-us-east-1}
+# AWS allows only one OIDC provider per URL per account. Leave unset to
+# auto-detect, or force with CREATE_OIDC_PROVIDER=true|false.
+CREATE_OIDC_PROVIDER=${CREATE_OIDC_PROVIDER:-}
 
 # Change to repo root (script lives in deploy/)
 cd "$(dirname "$0")/.."
@@ -60,8 +63,25 @@ echo ""
 # ============================================================================
 # Bootstrap stack
 # ============================================================================
+# Auto-detect an existing GitHub OIDC provider unless explicitly overridden.
+# AWS permits only one provider per URL per account, so creating a second fails.
+if [[ -z "$CREATE_OIDC_PROVIDER" ]]; then
+  OIDC_URL="token.actions.githubusercontent.com"
+  EXISTING_OIDC=$(aws iam list-open-id-connect-providers \
+    --query "OpenIDConnectProviderList[?contains(Arn, '$OIDC_URL')].Arn" \
+    --output text 2>/dev/null || true)
+  if [[ -n "$EXISTING_OIDC" ]]; then
+    CREATE_OIDC_PROVIDER=false
+    echo -e "${YELLOW}  GitHub OIDC provider already exists; reusing it${NC}"
+    echo "    $EXISTING_OIDC"
+  else
+    CREATE_OIDC_PROVIDER=true
+  fi
+fi
+
 echo -e "${GREEN}==> Deploying Bootstrap Stack${NC}"
 echo "  GitHub: $GITHUB_ORG/$GITHUB_REPO"
+echo "  Create OIDC provider: $CREATE_OIDC_PROVIDER"
 echo ""
 
 aws cloudformation deploy \
@@ -72,6 +92,7 @@ aws cloudformation deploy \
     ProjectName=$PROJECT_NAME \
     GitHubOrg=$GITHUB_ORG \
     GitHubRepo=$GITHUB_REPO \
+    CreateOIDCProvider=$CREATE_OIDC_PROVIDER \
   --region $AWS_REGION
 
 echo -e "\n${GREEN}✓ Bootstrap stack deployed${NC}\n"

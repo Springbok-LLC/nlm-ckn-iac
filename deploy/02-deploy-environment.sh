@@ -10,14 +10,22 @@
 #     Exports cross-stack values consumed by the service stacks.
 #
 #   Phase 2 — Service stacks:
-#     nlm-ckn-<env>-frontend  → frontend.yaml  (first: no deps on arangodb/backend)
+#     nlm-ckn-<env>-frontend  → frontend.yaml  (S3 bucket only; no deps)
 #     nlm-ckn-<env>-arangodb  → arangodb.yaml  (slow: up to 20 min EC2 init)
-#     nlm-ckn-<env>-backend   → backend.yaml   (last: depends on arangodb-dns)
+#     nlm-ckn-<env>-backend   → backend.yaml   (depends on arangodb-dns)
+#
+#   Phase 3 — Frontend CDN (cutover, deployed LAST and only on request):
+#     nlm-ckn-<env>-frontend-cdn → frontend-cdn.yaml
+#     Owns the CloudFront distribution, its domain alias, the bucket policy and
+#     the Route53 record — the resources that collide with an existing
+#     environment on the same domain. NOT deployed by default; run it at cutover
+#     (with --with-cdn or --cdn-only) once the old distribution has released the
+#     domain alias.
 #
 # Each service stack can be redeployed independently without touching the others.
 #
 # USAGE:
-#   ./deploy/02-deploy-environment.sh <environment> [--infra-only|--services-only] [--auto-approve]
+#   ./deploy/02-deploy-environment.sh <environment> [MODE] [--with-cdn] [--auto-approve]
 #
 # ARGUMENTS:
 #   environment    Environment name: dev, sandbox, or prod
@@ -25,8 +33,14 @@
 # OPTIONS:
 #   --infra-only      Deploy only the infra (phase 1) stack
 #   --services-only   Deploy only the service (phase 2) stacks
+#   --cdn-only        Deploy only the frontend CDN (phase 3) stack (cutover step)
+#   --with-cdn        Also deploy the frontend CDN (phase 3) stack after services
+#   --attach-alias    Deploy the CDN stack with the domain alias + Route53 record
+#                     attached (AttachAlias=true). Omit for the first, alias-less
+#                     deploy; add it at cutover once the alias has been moved here
+#                     with associate-alias. Normally driven by cutover-frontend-cdn.sh.
 #   --auto-approve    Skip confirmation prompts (useful for CI/CD pipelines)
-#   (default: deploy both phases, prompt before each changeset execution)
+#   (default: deploy phase 1 + 2, SKIP phase 3, prompt before each changeset)
 #
 # PREREQUISITES:
 #   - Bootstrap stack deployed (./deploy/01-deploy-account-setup.sh)
@@ -55,13 +69,17 @@ fi
 ENVIRONMENT=$1
 DEPLOY_MODE=""
 AUTO_APPROVE=false
+DEPLOY_CDN=false
+ATTACH_ALIAS=false
 
 for arg in "${@:2}"; do
   case "$arg" in
-    --infra-only|--services-only) DEPLOY_MODE="$arg" ;;
+    --infra-only|--services-only|--cdn-only) DEPLOY_MODE="$arg" ;;
+    --with-cdn) DEPLOY_CDN=true ;;
+    --attach-alias) ATTACH_ALIAS=true ;;
     --auto-approve) AUTO_APPROVE=true ;;
     *) echo -e "${RED}Error: Unknown option: $arg${NC}"
-       echo "Valid options: --infra-only, --services-only, --auto-approve"
+       echo "Valid options: --infra-only, --services-only, --cdn-only, --with-cdn, --attach-alias, --auto-approve"
        exit 1 ;;
   esac
 done
@@ -115,7 +133,7 @@ echo "  Account Alias: $AWS_ACCOUNT_ALIAS"
 echo "  IAM Principal: $AWS_IAM_ARN"
 echo "  Region:        $AWS_REGION"
 echo "  Environment:   $ENVIRONMENT"
-echo "  Mode:          ${DEPLOY_MODE:-full (infra + services)}$( [ "$AUTO_APPROVE" = true ] && echo " --auto-approve" )"
+echo "  Mode:          ${DEPLOY_MODE:-full (infra + services)}$( [ "$DEPLOY_CDN" = true ] && echo " +cdn" )$( [ "$AUTO_APPROVE" = true ] && echo " --auto-approve" )"
 echo "  Templates:     s3://${TEMPLATES_BUCKET}/"
 echo -e "${YELLOW}========================================${NC}"
 echo ""
@@ -167,7 +185,34 @@ deploy_stack() {
   if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ] || [ "$STACK_STATUS" = "REVIEW_IN_PROGRESS" ]; then
     local CHANGESET_TYPE="CREATE"
   elif [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STACK_STATUS" = "CREATE_FAILED" ]; then
-    # Stack failed and rolled back (or was left in CREATE_FAILED). Must be deleted before recreating.
+    # Stack failed and rolled back (or was left in CREATE_FAILED). Normally we
+    # delete and recreate. GUARD: the frontend-cdn stack owns a live CloudFront
+    # distribution + the domain's DNS, so silently deleting it mid-cutover tears
+    # the distribution down and orphans the record — an environment outage (this
+    # is exactly what bit the dev cutover). For that stack, require an explicit
+    # typed confirmation and never auto-delete it non-interactively.
+    if [[ "$STACK_NAME" == *-frontend-cdn ]]; then
+      local LIVE_DIST reply
+      LIVE_DIST=$(aws cloudformation describe-stacks \
+        --stack-name "$STACK_NAME" --region $AWS_REGION \
+        --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+        --output text 2>/dev/null || echo "")
+      echo -e "${RED}  ⚠  ${STACK_NAME} is in ${STACK_STATUS}, and it owns the CloudFront${NC}"
+      echo -e "${RED}     distribution + the domain's DNS. Deleting it tears down the${NC}"
+      echo -e "${RED}     distribution${LIVE_DIST:+ ($LIVE_DIST)} and takes the domain offline.${NC}"
+      echo -e "${YELLOW}     Investigate the rollback cause first. If you are certain no live${NC}"
+      echo -e "${YELLOW}     traffic depends on it, delete manually, then re-run:${NC}"
+      echo "       aws cloudformation delete-stack --stack-name ${STACK_NAME} --region ${AWS_REGION}"
+      if [ "$AUTO_APPROVE" = true ]; then
+        echo -e "${RED}  Refusing to auto-delete a frontend-cdn stack with --auto-approve.${NC}"
+        return 1
+      fi
+      read -r -p "  Type the stack name to delete + recreate it, or anything else to abort: " reply
+      if [ "$reply" != "$STACK_NAME" ]; then
+        echo -e "${YELLOW}  Aborted — stack left untouched.${NC}"
+        return 1
+      fi
+    fi
     echo -e "${YELLOW}  Stack ${STACK_NAME} is in ${STACK_STATUS}. Deleting before recreating...${NC}"
     aws cloudformation delete-stack --stack-name "$STACK_NAME" --region $AWS_REGION
     echo -e "${YELLOW}  Waiting for deletion...${NC}"
@@ -221,7 +266,9 @@ deploy_stack() {
     --output text 2>/dev/null || echo "")
 
   if [ "$CHANGESET_STATUS" = "FAILED" ]; then
-    if echo "$CHANGESET_REASON" | grep -q "The submitted information didn't contain changes"; then
+    # CloudFormation reports "no changes" with either of two phrasings depending
+    # on the resource/situation; treat both as a no-op rather than a failure.
+    if echo "$CHANGESET_REASON" | grep -qE "didn't contain changes|No updates are to be performed"; then
       echo -e "${YELLOW}  No changes to deploy — stack is already up to date.${NC}"
       aws cloudformation delete-change-set \
         --stack-name "$STACK_NAME" \
@@ -376,7 +423,7 @@ INFRA_STACK="${PROJECT_NAME}-${ENVIRONMENT}"
 # ==============================================================================
 # Phase 1 — Infra stack
 # ==============================================================================
-if [ "$DEPLOY_MODE" != "--services-only" ]; then
+if [ "$DEPLOY_MODE" != "--services-only" ] && [ "$DEPLOY_MODE" != "--cdn-only" ]; then
   echo -e "${YELLOW}=======================================${NC}"
   echo -e "${YELLOW}  Phase 1: Infra Stack${NC}"
   echo -e "${YELLOW}=======================================${NC}"
@@ -412,7 +459,7 @@ fi
 # ==============================================================================
 # Phase 2 — Service stacks
 # ==============================================================================
-if [ "$DEPLOY_MODE" != "--infra-only" ]; then
+if [ "$DEPLOY_MODE" != "--infra-only" ] && [ "$DEPLOY_MODE" != "--cdn-only" ]; then
   echo -e "${YELLOW}=======================================${NC}"
   echo -e "${YELLOW}  Phase 2: Service Stacks${NC}"
   echo -e "${YELLOW}=======================================${NC}"
@@ -518,8 +565,10 @@ print(match[0] if match else 'root')
 ")
 
   # ────────────────────────────────────────────────
-  # 2a. Frontend stack — no dependency on arangodb/backend,
-  #     deploy first so the site is accessible sooner
+  # 2a. Frontend storage stack (S3 bucket only) — no dependency on
+  #     arangodb/backend, and no globally-unique resources, so it can deploy
+  #     side by side with an existing environment. The CloudFront distribution
+  #     + alias + Route53 record are the separate frontend-cdn stack (Phase 3).
   # ────────────────────────────────────────────────
   FRONTEND_PARAMS_FILE=$(make_params_file \
     ProjectName "$PROJECT_NAME" \
@@ -588,6 +637,28 @@ print(match[0] if match else 'root')
   # ────────────────────────────────────────────────
   # 2c. Backend stack (depends on arangodb-dns export)
   # ────────────────────────────────────────────────
+  # Pre-flight: the backend task definition pulls <ecr-url>:latest on first
+  # deployment (see backend.yaml). On a fresh, empty ECR repo the ECS service
+  # can never pull an image, never stabilizes, and this stack hangs for up to
+  # 3 hours. Fail fast with instructions instead of creating a doomed service.
+  ECR_URL=$(aws ssm get-parameter \
+    --name "/${PROJECT_NAME}/shared/ecr-url" \
+    --query 'Parameter.Value' --output text --region $AWS_REGION 2>/dev/null || echo "")
+  ECR_REPO="${ECR_URL##*/}"
+  if [ -n "$ECR_REPO" ] && ! aws ecr describe-images \
+        --repository-name "$ECR_REPO" \
+        --image-ids imageTag=latest \
+        --region $AWS_REGION >/dev/null 2>&1; then
+    echo -e "${RED}Error: no ':latest' image in ECR repo '${ECR_REPO}'.${NC}"
+    echo "  The backend ECS service pulls ${ECR_URL}:latest on first deploy;"
+    echo "  without it the service never stabilizes and the stack hangs for up to 3 hours."
+    echo ""
+    echo "  Push a backend image first (from the nlm-ckn-ui repo), then re-run:"
+    echo "    (in nlm-ckn-ui) ./scripts/app/deploy-backend.sh ${ENVIRONMENT}"
+    echo "    ./deploy/02-deploy-environment.sh ${ENVIRONMENT} --services-only"
+    exit 1
+  fi
+
   BACKEND_PARAMS_FILE=$(make_params_file \
     ProjectName      "$PROJECT_NAME" \
     Environment      "$ENVIRONMENT" \
@@ -610,6 +681,52 @@ print(match[0] if match else 'root')
 fi
 
 # ==============================================================================
+# Phase 3 — Frontend CDN stack (cutover)
+# ==============================================================================
+# Owns the CloudFront distribution, its domain alias, the bucket policy and the
+# Route53 record — the resources that collide with an existing environment on the
+# same domain. Deployed LAST and only on request (--with-cdn or --cdn-only),
+# after the previous distribution has released the domain alias.
+CDN_STACK="${PROJECT_NAME}-${ENVIRONMENT}-frontend-cdn"
+if [ "$DEPLOY_MODE" = "--cdn-only" ] || { [ "$DEPLOY_CDN" = true ] && [ "$DEPLOY_MODE" != "--infra-only" ]; }; then
+  echo -e "${YELLOW}=======================================${NC}"
+  echo -e "${YELLOW}  Phase 3: Frontend CDN Stack${NC}"
+  echo -e "${YELLOW}=======================================${NC}"
+  echo ""
+
+  # AttachAlias=false stands the distribution up alias-less (side by side with an
+  # existing environment); --attach-alias flips it on at cutover, after
+  # associate-alias has moved the domain alias here (see cutover-frontend-cdn.sh).
+  CDN_PARAMS_FILE=$(make_params_file \
+    ProjectName "$PROJECT_NAME" \
+    Environment "$ENVIRONMENT" \
+    AttachAlias "$ATTACH_ALIAS")
+
+  CDN_RESULT=0
+  deploy_stack \
+    "$CDN_STACK" \
+    "environment/services/frontend/cloudformation/frontend-cdn.yaml" \
+    "$CDN_PARAMS_FILE" || CDN_RESULT=$?
+
+  if [ "$CDN_RESULT" = "1" ]; then
+    echo -e "${RED}Frontend CDN stack deployment failed or was aborted.${NC}"
+    echo -e "${YELLOW}If this failed on a CloudFront alias / Route53 conflict, the old${NC}"
+    echo -e "${YELLOW}distribution still owns ${ENVIRONMENT}.<domain>. Remove it first, then retry:${NC}"
+    echo "  ./deploy/02-deploy-environment.sh ${ENVIRONMENT} --cdn-only"
+    exit 1
+  fi
+
+  echo ""
+elif [ "$DEPLOY_MODE" != "--infra-only" ]; then
+  echo -e "${YELLOW}==> Skipping frontend CDN stack (${CDN_STACK}).${NC}"
+  echo "    It owns the CloudFront domain alias + Route53 record, which collide"
+  echo "    with an existing environment on the same domain. Deploy it at cutover,"
+  echo "    after the old distribution is removed:"
+  echo "      ./deploy/02-deploy-environment.sh ${ENVIRONMENT} --cdn-only"
+  echo ""
+fi
+
+# ==============================================================================
 # Summary
 # ==============================================================================
 echo -e "${BLUE}========================================${NC}"
@@ -618,11 +735,13 @@ echo -e "${BLUE}========================================${NC}"
 echo ""
 
 if [ "$DEPLOY_MODE" != "--infra-only" ]; then
+  # FrontendUrl + distribution ID come from the CDN stack (Phase 3); until it is
+  # deployed at cutover these read "(not yet deployed)".
   FRONTEND_URL=$(aws cloudformation describe-stacks \
-    --stack-name "${PROJECT_NAME}-${ENVIRONMENT}-frontend" \
+    --stack-name "${PROJECT_NAME}-${ENVIRONMENT}-frontend-cdn" \
     --region $AWS_REGION \
     --query 'Stacks[0].Outputs[?OutputKey==`FrontendUrl`].OutputValue' \
-    --output text 2>/dev/null || echo "(not yet deployed)")
+    --output text 2>/dev/null || echo "(not yet deployed — run --cdn-only at cutover)")
 
   FRONTEND_BUCKET=$(aws cloudformation describe-stacks \
     --stack-name "${PROJECT_NAME}-${ENVIRONMENT}-frontend" \
@@ -631,7 +750,7 @@ if [ "$DEPLOY_MODE" != "--infra-only" ]; then
     --output text 2>/dev/null || echo "")
 
   CF_ID=$(aws cloudformation describe-stacks \
-    --stack-name "${PROJECT_NAME}-${ENVIRONMENT}-frontend" \
+    --stack-name "${PROJECT_NAME}-${ENVIRONMENT}-frontend-cdn" \
     --region $AWS_REGION \
     --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
     --output text 2>/dev/null || echo "")

@@ -16,6 +16,17 @@ Parameters:
     Description: GitHub repository name
     Default: nlm-ckn-ui
 
+  CreateOIDCProvider:
+    Type: String
+    Description: >-
+      Whether to create the GitHub OIDC provider. AWS allows only one OIDC
+      provider per URL per account, so set this to "false" if the account
+      already has a provider for token.actions.githubusercontent.com.
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -28,6 +39,10 @@ Metadata:
         Parameters:
           - GitHubOrg
           - GitHubRepo
+          - CreateOIDCProvider
+
+Conditions:
+  ShouldCreateOIDCProvider: !Equals [!Ref CreateOIDCProvider, 'true']
 
 Resources:
   # ============================================================================
@@ -116,13 +131,18 @@ Resources:
   # ============================================================================
   GitHubOIDCProvider:
     Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOIDCProvider
     Properties:
       Url: https://token.actions.githubusercontent.com
       ClientIdList:
         - sts.amazonaws.com
       ThumbprintList:
-        # GitHub's OIDC thumbprint (as of 2024)
+        # GitHub's OIDC thumbprints (stable; rotated by GitHub with notice).
+        # Both are required — GitHub rotated its certificate, and a provider
+        # missing the newer thumbprint fails token validation
+        # ("web identity token provided could not be validated").
         - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -151,7 +171,10 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !GetAtt GitHubOIDCProvider.Arn
+              Federated: !If
+                - ShouldCreateOIDCProvider
+                - !GetAtt GitHubOIDCProvider.Arn
+                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringLike:
@@ -376,7 +399,10 @@ Outputs:
 
   GitHubOIDCProviderArn:
     Description: GitHub OIDC Provider ARN
-    Value: !GetAtt GitHubOIDCProvider.Arn
+    Value: !If
+      - ShouldCreateOIDCProvider
+      - !GetAtt GitHubOIDCProvider.Arn
+      - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
     Export:
       Name: !Sub '${ProjectName}-github-oidc-arn'
 

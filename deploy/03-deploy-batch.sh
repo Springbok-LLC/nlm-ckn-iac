@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
-# deploy-batch.sh — deploy the NLM-CKN Batch release stack end-to-end.
+# deploy-batch.sh — deploy the NLM-CKN Batch release stack.
 #
 # Steps:
-#   1. Deploy etl/cloudformation/ecr.yaml        (creates/updates nlm-ckn-etl-ecr)
-#   2. Build the pipeline Docker image       (--target pipeline, includes JRE)
-#   3. Push the image to ECR
-#   4. Deploy etl/cloudformation/batch.yaml      (creates/updates nlm-ckn-etl-batch)
+#   1. Deploy etl/cloudformation/ecr.yaml        (creates/updates the ECR repos)
+#   2. Confirm the pipeline image tag exists in ECR (does NOT build it)
+#   3. Deploy etl/cloudformation/batch.yaml      (creates/updates nlm-ckn-etl-batch)
+#
+# This script does NOT build or push container images. Images are built and
+# pushed by the nlm-ckn-etl repo's CI (.github/workflows/build-image.yml) into
+# the ECR repos this script provisions. If the pipeline image tag is missing at
+# step 2, the script prints copy/re-tag guidance and pauses so you can push the
+# image (in another shell), then continues when you press Enter. (Note: the
+# pipeline image is typically tagged with a release version like v1.5.0-rc.1
+# rather than 'latest' — set IMAGE_TAG or re-tag an existing image accordingly.)
 #
 # Prerequisites:
+#   - pipeline image pushed to ECR (nlm-ckn-etl CI, or re-tagged from an existing image)
 #   - etl/cloudformation/fetch.yaml already deployed (provides NCBI SSM + Secrets Manager)
 #   - AWS credentials with CloudFormation, ECR, IAM, Batch, EC2, and Logs permissions
 #
@@ -40,6 +48,7 @@
 #                        rather than as a plain environment variable.
 #   AWS_REGION           AWS region (default: from AWS CLI config)
 #   ECR_STACK_NAME       CloudFormation stack name for ECR (default: nlm-ckn-etl-ecr)
+#   IMAGE_TAG            Pipeline image tag to deploy (default: latest)
 #   BATCH_STACK_NAME     CloudFormation stack name for Batch (default: nlm-ckn-etl-batch)
 #   FETCH_STACK_NAME     CloudFormation stack name for fetch (default: nlm-ckn-etl-fetch)
 #                        When set, NCBI_API_KEY_SECRET_ARN is auto-resolved from outputs.
@@ -71,6 +80,7 @@ fi
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ECR_STACK_NAME="${ECR_STACK_NAME:-nlm-ckn-etl-ecr}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
 BATCH_STACK_NAME="${BATCH_STACK_NAME:-nlm-ckn-etl-batch}"
 FETCH_STACK_NAME="${FETCH_STACK_NAME:-nlm-ckn-etl-fetch}"
 INSTANCE_TYPES="${INSTANCE_TYPES:-r5.4xlarge,r5.2xlarge}"
@@ -115,33 +125,18 @@ aws cloudformation deploy \
 
 log "ECR stack ready."
 
-# ── Step 2: Resolve ECR details ───────────────────────────────────────────────
+# ── Step 2: Confirm the pipeline image tag exists (no build) ─────────────────
 PIPELINE_REPO_URI="$(cfn_output "${ECR_STACK_NAME}" PipelineRepositoryUri)"
-if [[ -z "${PIPELINE_REPO_URI}" ]]; then
-  echo "ERROR: CloudFormation output PipelineRepositoryUri not found in stack ${ECR_STACK_NAME}" >&2
+PIPELINE_REPO_NAME="$(cfn_output "${ECR_STACK_NAME}" PipelineRepositoryName)"
+if [[ -z "${PIPELINE_REPO_URI}" || -z "${PIPELINE_REPO_NAME}" ]]; then
+  echo "ERROR: CloudFormation outputs Pipeline{RepositoryUri,RepositoryName} not found in stack ${ECR_STACK_NAME}" >&2
   exit 1
 fi
-REGISTRY="${PIPELINE_REPO_URI%%/*}"   # account.dkr.ecr.region.amazonaws.com
 
-log "Pipeline ECR URI: ${PIPELINE_REPO_URI}"
+log "Pipeline ECR URI: ${PIPELINE_REPO_URI}:${IMAGE_TAG}"
+wait_for_ecr_image "${PIPELINE_REPO_NAME}" "${IMAGE_TAG}" "${REGION}"
 
-# ── Step 3: Build pipeline image ──────────────────────────────────────────────
-log "Building pipeline image (--target pipeline)..."
-docker build \
-  --platform linux/amd64 \
-  --target pipeline \
-  -t "${PIPELINE_REPO_URI}:latest" \
-  "${REPO_ROOT}"
-
-# ── Step 4: Push to ECR ───────────────────────────────────────────────────────
-log "Logging in to ECR (${REGISTRY})..."
-aws ecr get-login-password --region "${REGION}" \
-  | docker login --username AWS --password-stdin "${REGISTRY}"
-
-log "Pushing pipeline image..."
-docker push "${PIPELINE_REPO_URI}:latest"
-
-# ── Step 5: Resolve NCBI API key secret ARN ───────────────────────────────────
+# ── Step 3: Resolve NCBI API key secret ARN ───────────────────────────────────
 # Prefer an explicit env var; fall back to reading from the fetch stack outputs.
 if [[ -z "${NCBI_API_KEY_SECRET_ARN:-}" ]]; then
   log "NCBI_API_KEY_SECRET_ARN not set — reading from fetch stack (${FETCH_STACK_NAME})..."
@@ -156,7 +151,7 @@ fi
 
 log "NCBI API key secret ARN: ${NCBI_API_KEY_SECRET_ARN}"
 
-# ── Step 5b: Store GitHub token in Secrets Manager (optional) ─────────────────
+# ── Step 3b: Store GitHub token in Secrets Manager (optional) ─────────────────
 # When GITHUB_TOKEN is set, create or update the secret so the Batch job can
 # post deployment status updates without the token appearing in job env vars.
 GITHUB_TOKEN_SECRET_ARN=""
@@ -182,7 +177,7 @@ if [[ -n "${GITHUB_TOKEN:-}" ]]; then
   log "GitHub token secret ARN: ${GITHUB_TOKEN_SECRET_ARN}"
 fi
 
-# ── Step 6: Deploy Batch stack ────────────────────────────────────────────────
+# ── Step 4: Deploy Batch stack ────────────────────────────────────────────────
 log "Deploying Batch stack (${BATCH_STACK_NAME})..."
 aws cloudformation deploy \
   --template-file "${REPO_ROOT}/etl/cloudformation/batch.yaml" \
@@ -192,7 +187,7 @@ aws cloudformation deploy \
   --parameter-overrides \
     ProjectName="${PROJECT_NAME}" \
     S3Bucket="${S3_BUCKET_SSM_PARAM}" \
-    EcrImageUri="${PIPELINE_REPO_URI}:latest" \
+    EcrImageUri="${PIPELINE_REPO_URI}:${IMAGE_TAG}" \
     NcbiApiKeySecretArn="${NCBI_API_KEY_SECRET_ARN}" \
     GithubTokenSecretArn="${GITHUB_TOKEN_SECRET_ARN}" \
     VpcId="${VPC_ID}" \
