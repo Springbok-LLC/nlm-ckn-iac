@@ -247,13 +247,19 @@ Resources:
             OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # Managed-AllViewer
 
         # Custom error responses
+        # SPA client-side routing: S3+OAC returns 403 (only s3:GetObject is
+        # granted, so missing keys are AccessDenied, not NoSuchKey) and 404 for
+        # unknown paths, which we rewrite to index.html. ErrorCachingMinTTL: 0
+        # keeps a transient origin/API error from being cached and re-served.
         CustomErrorResponses:
           - ErrorCode: 403
             ResponseCode: 200
             ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
           - ErrorCode: 404
             ResponseCode: 200
             ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
 
         # SSL/TLS certificate (from alb.yaml, shared with ALB listeners)
         ViewerCertificate:
@@ -322,9 +328,14 @@ Resources:
                     UriPath: {}
                   PositionalConstraint: STARTS_WITH
                   SearchString: /arango_api/
+                  # Normalize before matching so encoded / mixed-case variants of
+                  # the path can't evade the rate limit: URL-decode first, then
+                  # lowercase (SearchString is already lowercase).
                   TextTransformations:
                     - Priority: 0
-                      Type: NONE
+                      Type: URL_DECODE
+                    - Priority: 1
+                      Type: LOWERCASE
           VisibilityConfig:
             SampledRequestsEnabled: true
             CloudWatchMetricsEnabled: true
