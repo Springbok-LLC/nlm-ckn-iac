@@ -105,6 +105,14 @@ probe "backend version"     "/arango_api/version/"      200
 # 3. ArangoDB connectivity + dataset present (real query through the full stack).
 #    collections/ is a POST that takes a graph; a JSON array back means Arango is up.
 probe "arango collections"  "/arango_api/collections/"  200 '\[.*\]' '{"graph":"ontologies"}'
+# 4. Hashed static asset served from S3 (not the SPA shell).
+probe "deep link"             "/static/media/schema.de470efb6d55ad554c83.png" 200
+# 5. Missing static asset returns 404 (not index.html fallback or 5xx).
+probe "asset not found"       "/static/media/missing.png"                     404
+# 6. Invalid API payload returns a client error (not 500 or HTML).
+probe "api error"             "/arango_api/collections/"                      400 '.*' '{"graph":"fake"}'
+# 7. Unknown API path returns 404 (routing and error handling intact).
+probe "api not found"         "/arango_api/__smoke_nonexistent__/"            404
 
 echo "----------------------------------------------------------------------"
 if [ "$FAILURES" -eq 0 ]; then
