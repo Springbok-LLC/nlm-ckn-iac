@@ -49,11 +49,17 @@ while [ $# -gt 0 ]; do
 done
 
 # ── Resolve the base URL ──────────────────────────────────────────────────────
+# FrontendUrl is exported by the CDN stack (frontend-cdn.yaml). Try that first,
+# then fall back to the pre-split ...-frontend stack for environments that still
+# carry the output there.
 if [ -z "$BASE_URL" ]; then
-  BASE_URL=$(aws cloudformation describe-stacks \
-    --stack-name "${PROJECT}-${ENVIRONMENT}-frontend" \
-    --query "Stacks[0].Outputs[?OutputKey=='FrontendUrl'].OutputValue" \
-    --output text 2>/dev/null)
+  for stack in "${PROJECT}-${ENVIRONMENT}-frontend-cdn" "${PROJECT}-${ENVIRONMENT}-frontend"; do
+    BASE_URL=$(aws cloudformation describe-stacks \
+      --stack-name "$stack" \
+      --query "Stacks[0].Outputs[?OutputKey=='FrontendUrl'].OutputValue" \
+      --output text 2>/dev/null)
+    [ -n "$BASE_URL" ] && [ "$BASE_URL" != "None" ] && break
+  done
 fi
 if [ -z "$BASE_URL" ] || [ "$BASE_URL" = "None" ]; then
   echo "Could not resolve a base URL for env '$ENVIRONMENT'." >&2
@@ -67,17 +73,20 @@ echo "----------------------------------------------------------------------"
 
 FAILURES=0
 
-# probe <label> <path> <expected-status> [grep-pattern] [json-body]
+# probe <label> <path> <expected-status> [grep-pattern] [json-body] [content-type]
 # GET by default; if json-body is given, POSTs it as application/json.
-# Passes when the HTTP status matches and (if given) the body matches the pattern.
+# Passes when the HTTP status matches, the body matches the pattern (if given),
+# and the response Content-Type matches the content-type pattern (if given). The
+# content-type check guards against a probe passing on the HTML SPA fallback
+# shell — e.g. an image or JSON endpoint that silently returns index.html.
 probe() {
-  local label="$1" path="$2" want="$3" pattern="${4:-}" data="${5:-}"
-  local body status time
-  local args=(-sS -m "$TIMEOUT" -w '\n%{http_code} %{time_total}')
+  local label="$1" path="$2" want="$3" pattern="${4:-}" data="${5:-}" wantctype="${6:-}"
+  local body status time ctype
+  local args=(-sS -m "$TIMEOUT" -w '\n%{http_code} %{time_total} %{content_type}')
   [ -n "$INSECURE" ] && args+=(-k)
   [ -n "$data" ] && args+=(-H 'Content-Type: application/json' --data "$data")
   body=$(curl "${args[@]}" "${BASE_URL}${path}" 2>/dev/null)
-  read -r status time <<<"$(printf '%s' "$body" | tail -1)"
+  read -r status time ctype <<<"$(printf '%s' "$body" | tail -1)"
   body=$(printf '%s' "$body" | sed '$d')
 
   local ok=true reason=""
@@ -85,6 +94,8 @@ probe() {
     ok=false; reason="status=$status want=$want"
   elif [ -n "$pattern" ] && ! printf '%s' "$body" | grep -qiE "$pattern"; then
     ok=false; reason="body did not match /$pattern/"
+  elif [ -n "$wantctype" ] && ! printf '%s' "$ctype" | grep -qiE "$wantctype"; then
+    ok=false; reason="content-type=$ctype want~/$wantctype/"
   fi
 
   if $ok; then
@@ -105,12 +116,16 @@ probe "backend version"     "/arango_api/version/"      200
 # 3. ArangoDB connectivity + dataset present (real query through the full stack).
 #    collections/ is a POST that takes a graph; a JSON array back means Arango is up.
 probe "arango collections"  "/arango_api/collections/"  200 '\[.*\]' '{"graph":"ontologies"}'
-# 4. Hashed static asset served from S3 (not the SPA shell).
-probe "deep link"             "/static/media/schema.de470efb6d55ad554c83.png" 200
+# 4. Stable static asset served from S3 as a real file, not the HTML SPA shell:
+#    assert an image content-type so a silent index.html fallback fails. favicon
+#    ships un-hashed in the app's public/ root, so this path is stable across
+#    frontend rebuilds (unlike a build-fingerprinted /static/media/*.png).
+probe "static asset"          "/favicon.ico"                    200 '' '' 'image/'
 # 5. Missing static asset returns 404 (not index.html fallback or 5xx).
 probe "asset not found"       "/static/media/missing.png"                     404
-# 6. Invalid API payload returns a client error (not 500 or HTML).
-probe "api error"             "/arango_api/collections/"                      400 '.*' '{"graph":"fake"}'
+# 6. Invalid API payload returns a JSON client error — assert the JSON content-
+#    type, not just the status, so a 400 HTML error/SPA page would still fail.
+probe "api error"             "/arango_api/collections/"        400 '' '{"graph":"fake"}' 'json'
 # 7. Unknown API path returns 404 (routing and error handling intact).
 probe "api not found"         "/arango_api/__smoke_nonexistent__/"            404
 

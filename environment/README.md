@@ -28,7 +28,7 @@ flowchart TB
     admin([Operator · VPN / bastion]):::actor
 
     subgraph edge[" Edge / CDN "]
-        cf[CloudFront + AWS WAF<br/>dev.nlm-ckn.org<br/>SPA routing · API rate limit]:::net
+        cf[CloudFront + AWS WAF<br/>dev.nlm-ckn.org<br/>SPA routing · rate limit: Block<br/>managed rules: Count]:::net
         s3f[(S3 — React static assets<br/>OAC-locked)]:::store
     end
 
@@ -81,7 +81,9 @@ flowchart TB
 
 The application is deployed to **https://dev.nlm-ckn.org/**. A researcher's
 browser reaches **CloudFront** — fronted by an **AWS WAF** Web ACL (per-IP rate
-limiting on the API path plus AWS managed rule groups) — which serves the React
+limiting **enforced** on the API path, plus AWS managed rule groups that default
+to *Count* / monitor-only via `ManagedRulesMode` and so do not block traffic on
+the initial deployment) — which serves the React
 static assets from **S3** (locked down with Origin Access Control) and routes
 `/arango_api/*` requests to the **Application Load Balancer** backend (`:8000`).
 Client-side routes are handled at the edge by a **CloudFront Function** that
@@ -89,7 +91,9 @@ rewrites extension-less requests to `index.html`, so deep links load the SPA
 while real asset misses and API errors keep their true status codes. CloudFront
 injects a secret `X-Custom-Origin-Header` on origin requests; the ALB listeners
 reject anything without it (403), so the backend cannot be reached directly,
-bypassing CloudFront's TLS and caching.
+bypassing CloudFront's TLS termination and WAF. (Edge caching applies to the
+static assets only; the `/arango_api/*` behavior uses a CachingDisabled policy,
+so backend responses are never cached.)
 
 ArangoDB is **not** publicly routable: CloudFront no longer proxies to the
 ArangoDB web UI/API. Its ALB `:8529` listener still exists but is no longer
