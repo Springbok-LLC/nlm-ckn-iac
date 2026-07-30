@@ -25,14 +25,15 @@ bucket.
 %%{init: {'theme':'base', 'themeVariables': {'fontFamily':'ui-sans-serif, system-ui, sans-serif', 'fontSize':'13px', 'lineColor':'#64748b', 'primaryTextColor':'#0f172a'}}}%%
 flowchart TB
     user([Researcher browser]):::actor
+    admin([Operator · VPN / bastion]):::actor
 
     subgraph edge[" Edge / CDN "]
-        cf[CloudFront distribution<br/>dev.nlm-ckn.org]:::net
+        cf[CloudFront + AWS WAF<br/>dev.nlm-ckn.org<br/>SPA routing · rate limit: Block<br/>managed rules: Count]:::net
         s3f[(S3 — React static assets<br/>OAC-locked)]:::store
     end
 
     subgraph platform[" Platform tier — main.yaml "]
-        alb[Application Load Balancer<br/>:8000 backend · :8529 arango<br/>X-Custom-Origin-Header enforced]:::net
+        alb[Application Load Balancer<br/>:8000 backend — CloudFront-fronted<br/>:8529 arango — VPC-internal only<br/>X-Custom-Origin-Header enforced]:::net
         cluster[ECS cluster]:::plat
         cloudmap[Cloud Map<br/>private DNS namespace]:::plat
         secrets[[Secrets Manager<br/>Django · ArangoDB · CloudFront header]]:::plat
@@ -48,11 +49,10 @@ flowchart TB
     dataset[(S3 dataset bucket<br/>golden-dump.tar.gz)]:::store
 
     user -->|HTTPS| cf
-    cf -->|default →| s3f
-    cf -->|/api/* :8000| alb
-    cf -->|/arango_api/* :8529| alb
+    cf -->|default → SPA| s3f
+    cf -->|/arango_api/* → :8000| alb
     alb --> backend
-    alb --> arango
+    admin -->|:8529 · VPN / VPC-internal| arango
 
     backend -->|pull image| ecr
     backend -->|read| secrets
@@ -80,12 +80,25 @@ flowchart TB
 > subgraph boxes group resources by the stack that provisions them.
 
 The application is deployed to **https://dev.nlm-ckn.org/**. A researcher's
-browser reaches **CloudFront**, which serves the React static assets from **S3**
-(locked down with Origin Access Control) and routes `/api/*` and `/arango_api/*`
-requests to the **Application Load Balancer**. CloudFront injects a secret
-`X-Custom-Origin-Header` on those origin requests; the ALB listeners reject
-anything without it (403), so the backend and ArangoDB cannot be reached
-directly, bypassing CloudFront's TLS and caching.
+browser reaches **CloudFront** — fronted by an **AWS WAF** Web ACL (per-IP rate
+limiting **enforced** on the API path, plus AWS managed rule groups that default
+to *Count* / monitor-only via `ManagedRulesMode` and so do not block traffic on
+the initial deployment) — which serves the React
+static assets from **S3** (locked down with Origin Access Control) and routes
+`/arango_api/*` requests to the **Application Load Balancer** backend (`:8000`).
+Client-side routes are handled at the edge by a **CloudFront Function** that
+rewrites extension-less requests to `index.html`, so deep links load the SPA
+while real asset misses and API errors keep their true status codes. CloudFront
+injects a secret `X-Custom-Origin-Header` on origin requests; the ALB listeners
+reject anything without it (403), so the backend cannot be reached directly,
+bypassing CloudFront's TLS termination and WAF. (Edge caching applies to the
+static assets only; the `/arango_api/*` behavior uses a CachingDisabled policy,
+so backend responses are never cached.)
+
+ArangoDB is **not** publicly routable: CloudFront no longer proxies to the
+ArangoDB web UI/API. Its ALB `:8529` listener still exists but is no longer
+CloudFront-fronted, and the security groups only allow `8529` VPC-internal — so
+operators reach ArangoDB over a VPN / bastion rather than the public edge.
 
 Behind the ALB, the **Django backend** runs on **ECS Fargate** — it pulls its
 image from the shared `nlm-ckn-backend` **ECR** repository, reads Django/ArangoDB
@@ -126,7 +139,8 @@ own templates (below) and `prod` is managed by NIH outside this repo.
 
 | Service | Template | Provisions |
 |---------|----------|------------|
-| Frontend | `frontend/cloudformation/frontend.yaml` | S3 bucket, CloudFront distribution (S3 + two ALB origins), OAC, Route 53 record. |
+| Frontend (bucket) | `frontend/cloudformation/frontend.yaml` | S3 bucket for the built React assets (private; served only through CloudFront OAC). |
+| Frontend (CDN) | `frontend/cloudformation/frontend-cdn.yaml` | CloudFront distribution (S3 + backend ALB origin), OAC, S3 bucket policy, **AWS WAF** Web ACL, and a **CloudFront Function** for SPA routing. The domain alias is gated by `AttachAlias`; the Route 53 record is owned by the cutover script (below), not CloudFormation. |
 | Backend | `backend/cloudformation/backend.yaml` | ECS task definition + service, IAM roles, auto-scaling policies. |
 | ArangoDB | `arangodb/cloudformation/arangodb.yaml` | EC2 instance + EBS volume, Cloud Map service registration, S3 restore on boot. |
 | Monitoring | `monitoring/cloudformation/monitoring.yaml` | CloudWatch alarms, wedge-detection Lambdas, SNS notifications, KMS key. Optional. |
@@ -153,6 +167,13 @@ service stacks) with **monitoring** following in **Wave 3**:
 The `sandbox/` stacks are deployed separately with their own CloudFormation, and
 `prod` is deployed by the NIH team outside this repo — neither is driven by
 `02-deploy-environment.sh`.
+
+The frontend CDN uses a two-pass alias cutover so a new distribution can replace
+an existing one without a `CNAMEAlreadyExists` collision: it is first deployed
+alias-less (`--cdn-only`), then
+[`deploy/cutover-frontend-cdn.sh <env>`](../deploy/cutover-frontend-cdn.sh)
+moves the domain alias onto the new distribution, repoints Route 53 (A + AAAA),
+and reconciles the stack with `AttachAlias=true`.
 
 Application code and data are shipped onto this infrastructure separately from
 the [`nlm-ckn-ui`](https://github.com/Springbok-LLC/nlm-ckn-ui) repo
