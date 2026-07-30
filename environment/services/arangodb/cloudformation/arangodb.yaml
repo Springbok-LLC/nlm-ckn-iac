@@ -831,9 +831,14 @@ Resources:
               var u = '${ArangoDbUser}';
               if (users.exists(u)) { users.update(u, '$RO_PASSWORD', true); }
               else { users.save(u, '$RO_PASSWORD', true); }
-              users.grantDatabase(u, 'Cell-KN-Ontologies', 'ro');
-              users.grantDatabase(u, 'Cell-KN-Phenotypes', 'ro');
-              print('read-only user ${ArangoDbUser} ready (ro on Cell-KN-Ontologies, Cell-KN-Phenotypes)');
+              // Grant per-database so a not-yet-restored env (dataset-version
+              // 'none', no databases created) skips the missing DB instead of
+              // aborting UserData; re-runs pick it up once the dataset restores.
+              ['Cell-KN-Ontologies', 'Cell-KN-Phenotypes'].forEach(function (d) {
+                try { users.grantDatabase(u, d, 'ro'); print('granted ro on ' + d); }
+                catch (e) { print('skip grant on ' + d + ' (not present yet): ' + e); }
+              });
+              print('read-only user ${ArangoDbUser} ready');
             "
           echo "==> Read-only backend user '${ArangoDbUser}' ready"
 
