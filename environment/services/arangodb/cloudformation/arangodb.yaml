@@ -25,8 +25,11 @@ Parameters:
 
   ArangoDbUser:
     Type: String
-    Default: root
-    Description: ArangoDB root username
+    Default: nlm_ro
+    Description: >
+      ArangoDB read-only username used by the backend to authenticate.
+      This user is created in UserData with read-only grants on the app
+      databases. Root is reserved for container init + restore only.
 
   # EBS volume size in GB for ArangoDB data.
   EbsVolumeSize:
@@ -621,8 +624,10 @@ Resources:
           systemctl enable docker
           systemctl start docker
 
-          ARANGO_PASSWORD=$(aws secretsmanager get-secret-value \
-            --secret-id "/$PROJECT_NAME/$ENVIRONMENT/secrets/arangodb-password" \
+          # ROOT password (container init + arangorestore only). Reserved for
+          # privileged operations; the backend uses the read-only user instead.
+          ARANGO_ROOT_PASSWORD=$(aws secretsmanager get-secret-value \
+            --secret-id "/$PROJECT_NAME/$ENVIRONMENT/secrets/arangodb-root-password" \
             --query 'SecretString' \
             --output text \
             --region "$REGION")
@@ -650,7 +655,7 @@ Resources:
             --name arangodb \
             --restart unless-stopped \
             -p 8529:8529 \
-            -e ARANGO_ROOT_PASSWORD="$ARANGO_PASSWORD" \
+            -e ARANGO_ROOT_PASSWORD="$ARANGO_ROOT_PASSWORD" \
             -e ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY="${!ARANGO_MEM_MIB}MiB" \
             -v "$DATA_DIR:/var/lib/arangodb3" \
             -v "$APPS_DIR:/var/lib/arangodb3-apps" \
@@ -748,7 +753,7 @@ Resources:
               arangodb:3.12 \
               arangorestore \
               --server.endpoint tcp://127.0.0.1:8529 \
-              --server.password "$ARANGO_PASSWORD" \
+              --server.password "$ARANGO_ROOT_PASSWORD" \
               --create-database true \
               --overwrite true \
               --include-system-collections false \
@@ -759,6 +764,78 @@ Resources:
             rm -rf "$DUMP_EXTRACT_DIR"
             echo "==> Dataset restore complete"
           fi
+
+          # ── 4b. Create/refresh the read-only backend user ────────────────────
+          # The backend authenticates as a read-only user (ArangoDbUser), not as
+          # root; root is reserved for container init + restore. This step is
+          # idempotent and self-healing across the existing-volume migration:
+          #   - Fresh volume: root already uses the new arangodb-root-password
+          #     secret (it was passed as ARANGO_ROOT_PASSWORD at container init).
+          #   - Pre-split volume: the on-disk root password predates the split and
+          #     still equals the OLD shared value, which now lives in the
+          #     arangodb-password (read-only user) secret. Detect that and rotate
+          #     root onto the new secret before creating the read-only user.
+          echo "==> Ensuring read-only backend user '${ArangoDbUser}'"
+
+          # Read-only (backend) user password: the EXISTING arangodb-password secret.
+          RO_PASSWORD=$(aws secretsmanager get-secret-value \
+            --secret-id "/$PROJECT_NAME/$ENVIRONMENT/secrets/arangodb-password" \
+            --query 'SecretString' \
+            --output text \
+            --region "$REGION")
+
+          # arangosh auth probe: exits 0 only if the supplied password is root's.
+          # Used as an `if` condition so a failed probe never aborts under set -e.
+          arango_root_auth_ok() {
+            docker exec arangodb arangosh \
+              --server.endpoint tcp://127.0.0.1:8529 \
+              --server.username root \
+              --server.password "$1" \
+              --javascript.execute-string "print('auth-ok');" > /dev/null 2>&1
+          }
+
+          if arango_root_auth_ok "$ARANGO_ROOT_PASSWORD"; then
+            echo "==> root already authenticates with the arangodb-root-password secret"
+          elif arango_root_auth_ok "$RO_PASSWORD"; then
+            echo "==> root still on the pre-split shared password; rotating onto arangodb-root-password secret"
+            docker exec arangodb arangosh \
+              --server.endpoint tcp://127.0.0.1:8529 \
+              --server.username root \
+              --server.password "$RO_PASSWORD" \
+              --javascript.execute-string "require('@arangodb/users').update('root', '$ARANGO_ROOT_PASSWORD', true);"
+            if ! arango_root_auth_ok "$ARANGO_ROOT_PASSWORD"; then
+              echo "ERROR: root password rotation did not take effect"
+              /opt/aws/bin/cfn-signal -e 1 \
+                --stack "${AWS::StackName}" \
+                --resource ArangoDbInstance \
+                --region "${AWS::Region}"
+              exit 1
+            fi
+          else
+            echo "ERROR: cannot authenticate as root with either the new or the pre-split password"
+            /opt/aws/bin/cfn-signal -e 1 \
+              --stack "${AWS::StackName}" \
+              --resource ArangoDbInstance \
+              --region "${AWS::Region}"
+            exit 1
+          fi
+
+          # Authenticated as root (new secret): create/update the read-only user
+          # and grant read-only on the two application databases. Idempotent.
+          docker exec arangodb arangosh \
+            --server.endpoint tcp://127.0.0.1:8529 \
+            --server.username root \
+            --server.password "$ARANGO_ROOT_PASSWORD" \
+            --javascript.execute-string "
+              var users = require('@arangodb/users');
+              var u = '${ArangoDbUser}';
+              if (users.exists(u)) { users.update(u, '$RO_PASSWORD', true); }
+              else { users.save(u, '$RO_PASSWORD', true); }
+              users.grantDatabase(u, 'Cell-KN-Ontologies', 'ro');
+              users.grantDatabase(u, 'Cell-KN-Phenotypes', 'ro');
+              print('read-only user ${ArangoDbUser} ready (ro on Cell-KN-Ontologies, Cell-KN-Phenotypes)');
+            "
+          echo "==> Read-only backend user '${ArangoDbUser}' ready"
 
           # ── 5. Register with Cloud Map ────────────────────────────────────────
           PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
