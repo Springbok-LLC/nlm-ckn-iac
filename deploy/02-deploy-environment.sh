@@ -434,10 +434,13 @@ if [ "$DEPLOY_MODE" != "--services-only" ] && [ "$DEPLOY_MODE" != "--cdn-only" ]
 
   # ProjectName is injected from the shared constant (not the parameters file),
   # so it's set once for the whole repo. Drop any stale ProjectName in the file.
+  # ArangoDbUser lives in the parameters file as the source of truth for the
+  # arangodb service stack (read below), but main.yaml has no such parameter, so
+  # strip it from the Phase 1 passthrough to avoid a ValidationError.
   python3 -c "
 import json, sys
 params = json.load(open('${PARAMETERS_FILE}'))
-params = [p for p in params if p['ParameterKey'] not in ('ProjectName', 'TemplatesBucketName')]
+params = [p for p in params if p['ParameterKey'] not in ('ProjectName', 'TemplatesBucketName', 'ArangoDbUser')]
 params.append({'ParameterKey': 'ProjectName', 'ParameterValue': '${PROJECT_NAME}'})
 params.append({'ParameterKey': 'TemplatesBucketName', 'ParameterValue': '${TEMPLATES_BUCKET}'})
 print(json.dumps(params))
@@ -556,13 +559,26 @@ if [ "$DEPLOY_MODE" != "--infra-only" ] && [ "$DEPLOY_MODE" != "--cdn-only" ]; t
 
   echo "  arango-az:     $ARANGO_AZ"
 
-  # Read ArangoDbUser from parameters file
+  # Read ArangoDbUser from the parameters file. This is the source of truth for
+  # which ArangoDB account the backend authenticates as — nlm_ro, the read-only
+  # user introduced in PR #11. It is REQUIRED: a missing key must fail loudly
+  # rather than silently falling back to a privileged account (e.g. root), which
+  # would quietly undo the read-only hardening for any env lacking the entry.
   ARANGO_USER=$(python3 -c "
-import json
+import json, sys
 params = json.load(open('${PARAMETERS_FILE}'))
 match = [p['ParameterValue'] for p in params if p['ParameterKey'] == 'ArangoDbUser']
-print(match[0] if match else 'root')
-")
+# An empty or whitespace-only value is as dangerous as a missing key: it would
+# flow downstream as a blank user and fail (or fall back) far from here.
+value = str(match[0]).strip() if match else ''
+if not value:
+    sys.exit(1)
+print(value)
+") || {
+    echo -e "${RED}Error: ArangoDbUser is required but missing or empty in ${PARAMETERS_FILE}.${NC}"
+    echo "  Add an ArangoDbUser entry (e.g. \"nlm_ro\") to the parameters file."
+    exit 1
+  }
 
   # ────────────────────────────────────────────────
   # 2a. Frontend storage stack (S3 bucket only) — no dependency on
@@ -675,6 +691,94 @@ print(match[0] if match else 'root')
   if [ "$BACKEND_RESULT" = "1" ]; then
     echo -e "${RED}Backend stack deployment failed or was aborted.${NC}"
     exit 1
+  fi
+
+  # ────────────────────────────────────────────────
+  # 2d. Force a backend rollout so running tasks re-read their config
+  # ────────────────────────────────────────────────
+  # Every entry in the task definition's `secrets:` block (SECRET_KEY,
+  # ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, ARANGO_DB_USER, ARANGO_DB_PASSWORD) is
+  # a REFERENCE to an SSM parameter or Secrets Manager secret, resolved once at
+  # task start. Changing any of those VALUES leaves the task definition byte for
+  # byte identical, so CloudFormation sees no diff, ECS never rolls, and the
+  # running tasks keep serving the config they booted with -- indefinitely.
+  #
+  # That bit us on the ArangoDB read-only split (PR #11): the arangodb stack
+  # flipped /arango/db-user root -> nlm_ro and rotated root's password onto the
+  # new arangodb-root-password secret, but the backend tasks kept authenticating
+  # as root with the pre-split password and 401'd on every query until someone
+  # forced a rollout by hand.
+  #
+  # Unconditional on purpose: run it even when deploy_stack reported no changes
+  # (exit 2), because "no stack changes" is exactly the case this exists for. A
+  # rolling restart of an already-current service is a no-op worth paying for.
+  # Resolve from the stack exports, falling back to the naming convention.
+  # The `|| true` matters under `set -e`: a lookup miss must fall through to the
+  # fallback, not abort the deploy.
+  ECS_CLUSTER=$(aws cloudformation list-exports \
+    --region $AWS_REGION \
+    --query "Exports[?Name=='${PROJECT_NAME}-${ENVIRONMENT}-cluster-name'].Value" \
+    --output text 2>/dev/null || true)
+  ECS_SERVICE=$(aws cloudformation list-exports \
+    --region $AWS_REGION \
+    --query "Exports[?Name=='${PROJECT_NAME}-${ENVIRONMENT}-backend-service-name'].Value" \
+    --output text 2>/dev/null || true)
+  if [ -z "$ECS_CLUSTER" ] || [ "$ECS_CLUSTER" = "None" ]; then
+    ECS_CLUSTER="${PROJECT_NAME}-${ENVIRONMENT}-cluster"
+  fi
+  if [ -z "$ECS_SERVICE" ] || [ "$ECS_SERVICE" = "None" ]; then
+    ECS_SERVICE="${PROJECT_NAME}-${ENVIRONMENT}-backend"
+  fi
+
+  echo -e "${BLUE}Rolling the backend service so tasks pick up current config...${NC}"
+  echo "  cluster: $ECS_CLUSTER"
+  echo "  service: $ECS_SERVICE"
+
+  if ! aws ecs update-service \
+      --cluster "$ECS_CLUSTER" \
+      --service "$ECS_SERVICE" \
+      --force-new-deployment \
+      --region $AWS_REGION >/dev/null; then
+    echo -e "${RED}Error: could not start a new backend deployment.${NC}"
+    echo "  The stack deployed, but running tasks may still hold stale config"
+    echo "  (e.g. the pre-split ArangoDB user). Roll it manually:"
+    echo "    aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_SERVICE} --force-new-deployment --region ${AWS_REGION}"
+    exit 1
+  fi
+
+  # Wait for the roll to finish before moving on. Issuing a second
+  # --force-new-deployment while one is mid-roll kills the in-flight tasks and
+  # sends ECS into a several-minute placement backoff, which looks exactly like
+  # a restart that silently did nothing -- so never skip this.
+  echo "  waiting for the service to reach steady state..."
+  if ! aws ecs wait services-stable \
+      --cluster "$ECS_CLUSTER" \
+      --services "$ECS_SERVICE" \
+      --region $AWS_REGION; then
+    # The waiter gives up after 40 polls (~10 minutes). A healthy but slow roll
+    # -- big image pull, long health-check grace period -- routinely runs past
+    # that, so a non-zero exit here is not by itself a failure. Ask ECS what the
+    # rollout is actually doing before failing the deploy.
+    ROLLOUT_STATE=$(aws ecs describe-services \
+      --cluster "$ECS_CLUSTER" \
+      --services "$ECS_SERVICE" \
+      --region $AWS_REGION \
+      --query 'services[0].deployments[?status==`PRIMARY`].rolloutState | [0]' \
+      --output text 2>/dev/null || true)
+
+    if [ "$ROLLOUT_STATE" = "IN_PROGRESS" ]; then
+      echo -e "${YELLOW}  Warning: the roll is still in progress past the wait timeout.${NC}"
+      echo "  This is not a failure. Do NOT re-run --force-new-deployment while it"
+      echo "  is rolling; watch it finish instead:"
+      echo "    aws ecs describe-services --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_REGION} --query 'services[0].deployments'"
+    else
+      echo -e "${RED}Error: backend service did not reach steady state (rollout: ${ROLLOUT_STATE:-unknown}).${NC}"
+      echo "  Do NOT re-run --force-new-deployment yet; check the rollout first:"
+      echo "    aws ecs describe-services --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_REGION} --query 'services[0].events[:10]'"
+      exit 1
+    fi
+  else
+    echo -e "${GREEN}  Backend rolled; tasks are running with current config.${NC}"
   fi
 
   echo ""
