@@ -274,12 +274,16 @@ Resources:
                   - elasticloadbalancing:DeregisterTargets
                   - elasticloadbalancing:DescribeTargetGroups
                   - cloudformation:ListExports
-                  # cfn-init reads this instance's AWS::CloudFormation::Init
-                  # metadata (which holds the bootstrap script) via
-                  # DescribeStackResource. Without it the stub cannot fetch the
-                  # script and the instance signals failure.
-                  - cloudformation:DescribeStackResource
                 Resource: '*'
+              # cfn-init reads this instance's AWS::CloudFormation::Init
+              # metadata (which holds the bootstrap script) via
+              # DescribeStackResource. Without it the stub cannot fetch the
+              # script and the instance signals failure. Scoped to this stack --
+              # the instance has no reason to read any other stack's resources.
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                Resource: !Ref AWS::StackId
         # The instance attaches its own standalone data volume from UserData
         # rather than via a CloudFormation AWS::EC2::VolumeAttachment, which would
         # deadlock against this instance's CreationPolicy. Describe is account-wide

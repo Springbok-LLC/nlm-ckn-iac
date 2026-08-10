@@ -21,6 +21,8 @@ ignore_checks:
 #           every taggable resource.
 #   E9102 — tag propagation enabled on resources that launch tasks/instances
 #           (ECS services, Batch job definitions, Scheduler ECS targets).
+#   W9103 — early warning as UserData approaches that limit (off by default;
+#           set WARN_RATIO in .cfn-lint-rules/userdata_size.py below 1.0).
 #   E9103 — EC2 UserData within the 25600-byte base64 API limit. Neither
 #           validate-template nor a changeset dry run catches an oversized
 #           UserData; it surfaces only when CloudFormation calls the EC2 API

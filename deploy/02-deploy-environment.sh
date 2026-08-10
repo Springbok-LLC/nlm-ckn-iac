@@ -568,11 +568,14 @@ if [ "$DEPLOY_MODE" != "--infra-only" ] && [ "$DEPLOY_MODE" != "--cdn-only" ]; t
 import json, sys
 params = json.load(open('${PARAMETERS_FILE}'))
 match = [p['ParameterValue'] for p in params if p['ParameterKey'] == 'ArangoDbUser']
-if not match:
+# An empty or whitespace-only value is as dangerous as a missing key: it would
+# flow downstream as a blank user and fail (or fall back) far from here.
+value = str(match[0]).strip() if match else ''
+if not value:
     sys.exit(1)
-print(match[0])
+print(value)
 ") || {
-    echo -e "${RED}Error: ArangoDbUser is required but missing from ${PARAMETERS_FILE}.${NC}"
+    echo -e "${RED}Error: ArangoDbUser is required but missing or empty in ${PARAMETERS_FILE}.${NC}"
     echo "  Add an ArangoDbUser entry (e.g. \"nlm_ro\") to the parameters file."
     exit 1
   }
@@ -752,12 +755,31 @@ print(match[0])
       --cluster "$ECS_CLUSTER" \
       --services "$ECS_SERVICE" \
       --region $AWS_REGION; then
-    echo -e "${RED}Error: backend service did not reach steady state.${NC}"
-    echo "  Do NOT re-run --force-new-deployment yet; check the rollout first:"
-    echo "    aws ecs describe-services --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_REGION} --query 'services[0].events[:10]'"
-    exit 1
+    # The waiter gives up after 40 polls (~10 minutes). A healthy but slow roll
+    # -- big image pull, long health-check grace period -- routinely runs past
+    # that, so a non-zero exit here is not by itself a failure. Ask ECS what the
+    # rollout is actually doing before failing the deploy.
+    ROLLOUT_STATE=$(aws ecs describe-services \
+      --cluster "$ECS_CLUSTER" \
+      --services "$ECS_SERVICE" \
+      --region $AWS_REGION \
+      --query 'services[0].deployments[?status==`PRIMARY`].rolloutState | [0]' \
+      --output text 2>/dev/null || true)
+
+    if [ "$ROLLOUT_STATE" = "IN_PROGRESS" ]; then
+      echo -e "${YELLOW}  Warning: the roll is still in progress past the wait timeout.${NC}"
+      echo "  This is not a failure. Do NOT re-run --force-new-deployment while it"
+      echo "  is rolling; watch it finish instead:"
+      echo "    aws ecs describe-services --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_REGION} --query 'services[0].deployments'"
+    else
+      echo -e "${RED}Error: backend service did not reach steady state (rollout: ${ROLLOUT_STATE:-unknown}).${NC}"
+      echo "  Do NOT re-run --force-new-deployment yet; check the rollout first:"
+      echo "    aws ecs describe-services --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_REGION} --query 'services[0].events[:10]'"
+      exit 1
+    fi
+  else
+    echo -e "${GREEN}  Backend rolled; tasks are running with current config.${NC}"
   fi
-  echo -e "${GREEN}  Backend rolled; tasks are running with current config.${NC}"
 
   echo ""
 fi

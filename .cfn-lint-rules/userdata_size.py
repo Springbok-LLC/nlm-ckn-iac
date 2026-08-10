@@ -20,13 +20,18 @@ Loaded via `append_rules: [.cfn-lint-rules]` in .cfnlintrc.yaml.
 
 Sizing notes:
 - The size is measured on the *literal* template text. Fn::Sub placeholders are
-  counted at their placeholder width because the substituted value is unknown
-  at lint time; in practice the delta is small (tens of bytes) relative to the
-  margin this rule is protecting, and it is as often negative as positive.
+  counted at their placeholder width unless the Fn::Sub carries a variable map
+  with literal values, which are substituted before measuring; a Ref/GetAtt
+  value is unknown at lint time. In practice the delta is small (tens of bytes)
+  relative to the margin this rule is protecting, and it is as often negative
+  as positive.
 - `${!Literal}` escapes render one byte shorter (`${Literal}`) and are adjusted.
-- Because of that approximation, this rule is deliberately a hard-limit check
-  rather than a tight budget check. Set WARN_RATIO below 1.0 to also get an
-  early-warning W-level match as a template approaches the ceiling.
+- UserData is documented as *already base64-encoded*, so a literal string value
+  is the encoded payload and the raw script is what it decodes to. Only an
+  Fn::Base64 wraps a raw script, and only there is the 4/3 expansion applied.
+- Because of that approximation, E9103 is deliberately a hard-limit check rather
+  than a tight budget check. Set WARN_RATIO below 1.0 to also get W9103, an
+  early warning as a template approaches the ceiling.
 """
 
 import math
@@ -79,12 +84,29 @@ def _literal_size(node):
         return _literal_size(value)
 
     if fn == "Fn::Sub":
-        # Either "text" or ["text", {vars}]; only the text carries bytes.
-        text = value[0] if isinstance(value, list) and value else value
-        if not isinstance(text, str):
+        # Either "text" or ["text", {vars}].
+        if isinstance(value, list):
+            if not value:
+                return None
+            text = value[0]
+            variables = value[1] if len(value) > 1 else {}
+        else:
+            text, variables = value, {}
+        if not isinstance(text, str) or not isinstance(variables, dict):
             return None
         # `${!Foo}` is an escape that renders as `${Foo}` — one byte shorter.
-        return len(text.encode("utf-8")) - text.count("${!")
+        # Counted on the template text, before substitution, so a substituted
+        # value that happens to contain `${!` is not mistaken for an escape.
+        escapes = text.count("${!")
+        # Literal entries in the variable map render at their own width, so
+        # substitute them rather than counting the placeholder. `${!Foo}` is
+        # untouched by this: it does not contain the `${Foo}` substring.
+        # Non-literal entries (Ref/GetAtt) stay at placeholder width — see the
+        # sizing notes in the module docstring.
+        for name, replacement in variables.items():
+            if isinstance(replacement, str):
+                text = text.replace("${" + name + "}", replacement)
+        return len(text.encode("utf-8")) - escapes
 
     if fn == "Fn::Join":
         if not (isinstance(value, list) and len(value) == 2):
@@ -110,6 +132,28 @@ def _encoded_size(raw_bytes):
     return math.ceil(raw_bytes / 3) * 4
 
 
+def _decoded_size(encoded_bytes):
+    """Raw payload length behind a base64 string of encoded_bytes."""
+    return encoded_bytes // 4 * 3
+
+
+def _userdata_sizes(node):
+    """(raw, encoded) sizes for a UserData property value, or None.
+
+    Only Fn::Base64 wraps a *raw* script, so that is the one shape where the
+    4/3 expansion applies. Every other shape is the already-encoded form EC2
+    receives verbatim — its literal text is the encoded payload, and the raw
+    script is what that decodes to. Measuring those as raw and expanding them
+    again would overstate the payload by a third.
+    """
+    if isinstance(node, dict) and len(node) == 1 and "Fn::Base64" in node:
+        raw = _literal_size(node["Fn::Base64"])
+        return None if raw is None else (raw, _encoded_size(raw))
+
+    encoded = _literal_size(node)
+    return None if encoded is None else (_decoded_size(encoded), encoded)
+
+
 def _walk(properties, path):
     node = properties
     for key in path:
@@ -117,6 +161,35 @@ def _walk(properties, path):
             return None
         node = node.get(key)
     return node
+
+
+def _iter_userdata(cfn):
+    """Yield (resource name, template path, raw bytes, encoded bytes)."""
+    resources = cfn.template.get("Resources", {})
+    if not isinstance(resources, dict):
+        return
+
+    for name, resource in resources.items():
+        if not isinstance(resource, dict):
+            continue
+        path = USERDATA_PATHS.get(resource.get("Type"))
+        if path is None:
+            continue
+
+        properties = resource.get("Properties")
+        if not isinstance(properties, dict):
+            continue
+
+        node = _walk(properties, path)
+        if node is None:
+            continue
+
+        sizes = _userdata_sizes(node)
+        if sizes is None:
+            continue
+
+        raw, encoded = sizes
+        yield name, ["Resources", name, "Properties"] + list(path), raw, encoded
 
 
 class UserDataSize(CloudFormationLintRule):
@@ -133,32 +206,8 @@ class UserDataSize(CloudFormationLintRule):
 
     def match(self, cfn):
         matches = []
-        resources = cfn.template.get("Resources", {})
-        if not isinstance(resources, dict):
-            return matches
 
-        for name, resource in resources.items():
-            if not isinstance(resource, dict):
-                continue
-            path = USERDATA_PATHS.get(resource.get("Type"))
-            if path is None:
-                continue
-
-            properties = resource.get("Properties")
-            if not isinstance(properties, dict):
-                continue
-
-            node = _walk(properties, path)
-            if node is None:
-                continue
-
-            raw = _literal_size(node)
-            if raw is None:
-                continue
-
-            encoded = _encoded_size(raw)
-            location = ["Resources", name, "Properties"] + list(path)
-
+        for name, location, raw, encoded in _iter_userdata(cfn):
             remedy = (
                 "EC2 rejects the launch with InvalidRequest and CloudFormation "
                 "rolls the stack back. Move the bulk of the script out of "
@@ -190,16 +239,45 @@ class UserDataSize(CloudFormationLintRule):
                         ),
                     )
                 )
-            elif raw / MAX_RAW_BYTES >= WARN_RATIO:
-                matches.append(
-                    RuleMatch(
-                        location,
-                        "{0} UserData is ~{1} raw bytes — {2:.0%} of the EC2 raw "
-                        "limit of {3}, leaving only {4} bytes of headroom.".format(
-                            name, raw, raw / MAX_RAW_BYTES, MAX_RAW_BYTES,
-                            MAX_RAW_BYTES - raw,
-                        ),
-                    )
+
+        return matches
+
+
+class UserDataSizeApproaching(CloudFormationLintRule):
+    """Warn as EC2 UserData approaches the size limit, before it breaks."""
+
+    id = "W9103"
+    shortdesc = "UserData approaching EC2 size limit"
+    description = (
+        "Warn once UserData reaches {0:.0%} of the EC2 raw limit of {1} bytes, "
+        "so the ceiling is hit at lint time rather than mid-update. A payload "
+        "within the limit is still valid — E9103 owns the hard "
+        "failures.".format(WARN_RATIO, MAX_RAW_BYTES)
+    )
+    tags = ["resources", "ec2", "userdata", "limits"]
+
+    def match(self, cfn):
+        matches = []
+
+        # 1.0 disables the early warning entirely: a payload sitting exactly on
+        # the limit is legal, and everything past it is E9103's to report.
+        if WARN_RATIO >= 1.0:
+            return matches
+
+        for name, location, raw, encoded in _iter_userdata(cfn):
+            if raw > MAX_RAW_BYTES or encoded > MAX_ENCODED_BYTES:
+                continue
+            if raw / MAX_RAW_BYTES < WARN_RATIO:
+                continue
+            matches.append(
+                RuleMatch(
+                    location,
+                    "{0} UserData is ~{1} raw bytes — {2:.0%} of the EC2 raw "
+                    "limit of {3}, leaving only {4} bytes of headroom.".format(
+                        name, raw, raw / MAX_RAW_BYTES, MAX_RAW_BYTES,
+                        MAX_RAW_BYTES - raw,
+                    ),
                 )
+            )
 
         return matches
