@@ -87,14 +87,15 @@ echo ""
 
 aws cloudformation deploy \
   --template-file account/cloudformation/bootstrap.yaml \
-  --stack-name ${PROJECT_NAME}-bootstrap \
+  --stack-name "${PROJECT_NAME}-bootstrap" \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+  --no-fail-on-empty-changeset \
   --parameter-overrides \
-    ProjectName=$PROJECT_NAME \
-    GitHubOrg=$GITHUB_ORG \
-    GitHubRepo=$GITHUB_REPO \
-    CreateOIDCProvider=$CREATE_OIDC_PROVIDER \
-  --region $AWS_REGION
+    ProjectName="${PROJECT_NAME}" \
+    GitHubOrg="${GITHUB_ORG}" \
+    GitHubRepo="${GITHUB_REPO}" \
+    CreateOIDCProvider="${CREATE_OIDC_PROVIDER}" \
+  --region "${AWS_REGION}"
 
 echo -e "\n${GREEN}✓ Bootstrap stack deployed${NC}\n"
 
@@ -106,10 +107,11 @@ echo ""
 
 aws cloudformation deploy \
   --template-file shared/cloudformation/shared-resources.yaml \
-  --stack-name ${PROJECT_NAME}-shared \
+  --stack-name "${PROJECT_NAME}-shared" \
+  --no-fail-on-empty-changeset \
   --parameter-overrides \
-    ProjectName=$PROJECT_NAME \
-  --region $AWS_REGION
+    ProjectName="${PROJECT_NAME}" \
+  --region "${AWS_REGION}"
 
 echo -e "\n${GREEN}✓ Shared resources stack deployed${NC}\n"
 
@@ -124,11 +126,12 @@ echo ""
 
 aws cloudformation deploy \
   --template-file shared/cloudformation/static-assets.yaml \
-  --stack-name ${PROJECT_NAME}-static-assets \
+  --stack-name "${PROJECT_NAME}-static-assets" \
   --capabilities CAPABILITY_NAMED_IAM \
+  --no-fail-on-empty-changeset \
   --parameter-overrides \
-    ProjectName=$PROJECT_NAME \
-  --region $AWS_REGION
+    ProjectName="${PROJECT_NAME}" \
+  --region "${AWS_REGION}"
 
 echo -e "\n${GREEN}✓ Static assets stack deployed${NC}\n"
 

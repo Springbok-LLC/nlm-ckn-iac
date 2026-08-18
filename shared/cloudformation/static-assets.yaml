@@ -192,8 +192,11 @@ Resources:
               - s3:ListBucket
               - s3:GetBucketLocation
             Resource:
+              # Bucket ARN for ListBucket/GetBucketLocation; object reads are
+              # confined to the published asset prefix, which is all a reader
+              # needs to copy releases into its own environments.
               - !GetAtt StaticAssetsBucket.Arn
-              - !Sub '${StaticAssetsBucket.Arn}/*'
+              - !Sub '${StaticAssetsBucket.Arn}/${AssetPrefix}/*'
 
   # Published so consumers (nlm-ckn-ui's deploy-dataset.sh, nlm-ckn-etl's
   # manifest step) resolve the bucket by SSM lookup instead of reconstructing
@@ -224,13 +227,20 @@ Resources:
     Properties:
       RoleName: !Sub '${ProjectName}-assets-github-push'
       Description: Assumed by the nlm-ckn release workflow to publish plot assets to S3
-      MaxSessionDuration: 3600
+      # 2 h of headroom: the publish is ~5.7 GB across thousands of objects,
+      # and credentials expiring mid-sync leaves the tag prefix incomplete.
+      # The workflow still requests the action's 1-hour default; raising the
+      # ceiling here is what lets it ask for more when it needs to.
+      MaxSessionDuration: 7200
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+              # Imported rather than reconstructed, so this stack cannot be
+              # deployed before the bootstrap stack that owns the provider.
+              Federated:
+                Fn::ImportValue: !Sub '${ProjectName}-github-oidc-arn'
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:

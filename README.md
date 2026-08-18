@@ -37,7 +37,8 @@ nlm-ckn-iac/
 │   └── 03-deploy-monitoring.sh        # wave 3: needs 02-deploy-environment's outputs
 ├── account/            # One-time per-AWS-account setup: S3 buckets, GitHub OIDC, IAM role
 │   └── cloudformation/bootstrap.yaml
-├── shared/              # Cross-environment resources: ECR repo, ArangoDB dataset S3 bucket
+├── shared/              # Cross-environment resources: ECR repo, ArangoDB dataset S3 bucket,
+│                        #   plot asset S3 bucket + nlm-ckn GitHub OIDC push role
 │   └── cloudformation/
 │       ├── shared-resources.yaml   # ECR repo + ArangoDB dataset S3 bucket
 │       └── static-assets.yaml      # Plot asset S3 bucket + nlm-ckn GitHub OIDC push role
