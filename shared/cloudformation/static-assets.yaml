@@ -1,0 +1,314 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  NLM-CKN static plot assets — a shared, cross-environment S3 bucket holding the
+  SVG/HTML plot files produced by nlm-ckn, plus the GitHub OIDC role that lets
+  the nlm-ckn release workflow push into it.
+
+  Those files (~1,840 SVG + ~1,000 HTML, ~5.7 GB) are deliberately excluded from
+  the nlm-ckn release tarball (.github/workflows/package-prod-data.yml drops
+  *.html/*.svg), so they need their own transport. nlm-ckn pushes them here once
+  per release; nlm-ckn-ui's deploy-dataset.sh then does an S3→S3 copy into each
+  environment's frontend bucket. See the proposal "Where to host the static plot
+  assets" (nlm-ckn-rnd/docs/proposals/static-asset-hosting.md), option B.
+
+  Versioning comes from the key prefix, not the filename: the 6-hex suffix in
+  the nlm-ckn directory names identifies the CELLxGENE source dataset, not the
+  run, so the same filename recurs across releases. Objects are therefore keyed
+  <AssetPrefix>/<nlm-ckn tag>/... and the push role is scoped to that prefix.
+
+# ── Deployment ────────────────────────────────────────────────────────────────
+#
+# Deployed once per AWS account by deploy/01-deploy-account-setup.sh (wave 1),
+# after the bootstrap stack — which owns the account's single GitHub OIDC
+# provider — has created it. This stack only references that provider.
+#
+# The stack creates an IAM role with an explicit RoleName, so it needs
+# CAPABILITY_NAMED_IAM. To deploy it on its own:
+#
+#   aws cloudformation deploy \
+#     --template-file shared/cloudformation/static-assets.yaml \
+#     --stack-name nlm-ckn-static-assets \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides ProjectName=nlm-ckn
+#
+# After deploying, copy the AssetPushRoleArn output into the nlm-ckn repo's
+# AWS_ASSET_PUSH_ROLE_ARN Actions secret:
+#
+#   aws cloudformation describe-stacks \
+#     --stack-name nlm-ckn-static-assets \
+#     --query "Stacks[0].Outputs" --output table
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+Parameters:
+
+  ProjectName:
+    Type: String
+    Description: >
+      Project namespace for resource naming and the Project tag (ADR 0004).
+      Must match the value the other shared stacks are deployed with
+      (deploy/lib/common.sh, default nlm-ckn).
+
+  Owner:
+    Type: String
+    Default: springbok
+    Description: Owning team or contact, applied as the Owner tag (ADR 0004).
+
+  AssetPrefix:
+    Type: String
+    Default: plots
+    AllowedPattern: '^[a-z0-9][a-z0-9-]*$'
+    Description: >
+      Top-level key prefix the push role may write to. Objects are keyed
+      <AssetPrefix>/<nlm-ckn tag>/<tissue>/... — the release tag is what makes
+      the key unique, since the filenames repeat across releases. Keep this in
+      sync with the prefix nlm-ckn-etl records in the plot manifest.
+
+  GitHubRepos:
+    Type: CommaDelimitedList
+    Default: 'repo:Springbok-LLC/nlm-ckn:*'
+    Description: >
+      Repositories allowed to assume the push role, in "repo:OWNER/REPO:*"
+      format. Comma-separate multiple values. This is the GitHub identity, and
+      is deliberately separate from ProjectName (the AWS namespace).
+
+  PushWorkflowRefs:
+    Type: CommaDelimitedList
+    Default: 'Springbok-LLC/nlm-ckn/.github/workflows/publish-plot-assets.yml@refs/tags/*,Springbok-LLC/nlm-ckn/.github/workflows/publish-plot-assets.yml@refs/heads/main'
+    Description: >
+      job_workflow_ref values allowed to assume the push role — the workflow
+      file defining the job, not just the repo, so a different workflow in the
+      same repo cannot write to the bucket. The publish runs off a GitHub
+      release, which fires at refs/tags/<tag>; refs/heads/main is allowed so the
+      workflow can also be run manually. Update these if the workflow is renamed.
+
+  CrossAccountReaderAccountId:
+    Type: String
+    Default: '206537881715'
+    AllowedPattern: '^([0-9]{12})?$'
+    Description: >
+      AWS account granted read-only access to the assets, so it can copy them
+      into its own environments (the NIH sandbox account, mirroring the grant on
+      the ArangoDB dataset bucket in shared-resources.yaml). Set to an empty
+      string to grant no cross-account access.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Configuration
+        Parameters:
+          - ProjectName
+          - Owner
+          - AssetPrefix
+      - Label:
+          default: GitHub Configuration
+        Parameters:
+          - GitHubRepos
+          - PushWorkflowRefs
+      - Label:
+          default: Cross-Account Access
+        Parameters:
+          - CrossAccountReaderAccountId
+
+# ── Conditions ────────────────────────────────────────────────────────────────
+Conditions:
+  HasCrossAccountReader: !Not [!Equals [!Ref CrossAccountReaderAccountId, '']]
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+Resources:
+
+  # ============================================================================
+  # S3 Bucket for Static Plot Assets
+  #
+  # Private: nothing is served from here directly. Each environment's frontend
+  # bucket + CloudFront distribution serves its own copy, made by an S3→S3 copy
+  # in nlm-ckn-ui's deploy-dataset.sh.
+  # ============================================================================
+  StaticAssetsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ProjectName}-static-assets-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          # The prefix already carries the release version, so object versions
+          # only accumulate when the same tag is re-published. Keep a short
+          # recovery window rather than a second copy of ~5.7 GB forever.
+          - Id: ExpireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          # A push is thousands of objects; a failed run can strand multipart
+          # parts that are billed but invisible to ListObjects.
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub '${ProjectName}-static-assets-${AWS::AccountId}'
+        - Key: Component
+          Value: assets
+        - Key: Shared
+          Value: 'true'
+        - Key: Purpose
+          Value: Static plot assets (SVG/HTML) for all environments
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  # Read-only cross-account grant, so an account we don't manage (the NIH
+  # sandbox) can pull the assets into its own environments.
+  StaticAssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: HasCrossAccountReader
+    Properties:
+      Bucket: !Ref StaticAssetsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCrossAccountRead
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${CrossAccountReaderAccountId}:root'
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !GetAtt StaticAssetsBucket.Arn
+              - !Sub '${StaticAssetsBucket.Arn}/*'
+
+  # Published so consumers (nlm-ckn-ui's deploy-dataset.sh, nlm-ckn-etl's
+  # manifest step) resolve the bucket by SSM lookup instead of reconstructing
+  # the name from ProjectName + account id.
+  StaticAssetsBucketParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ProjectName}/shared/static-assets-bucket-name'
+      Type: String
+      Value: !Ref StaticAssetsBucket
+      Description: S3 bucket holding the NLM-CKN static plot assets.
+      Tags:
+        Project: !Ref ProjectName
+        Component: assets
+        Owner: !Ref Owner
+        ManagedBy: CloudFormation
+        Repository: nlm-ckn-iac
+
+  # ============================================================================
+  # GitHub OIDC Role for the nlm-ckn Publish Workflow
+  #
+  # The account's OIDC provider is created by the bootstrap stack
+  # (account/cloudformation/bootstrap.yaml) — AWS allows only one per URL per
+  # account, so this stack references it rather than creating its own.
+  # ============================================================================
+  AssetPushRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-assets-github-push'
+      Description: Assumed by the nlm-ckn release workflow to publish plot assets to S3
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                'token.actions.githubusercontent.com:job_workflow_ref': !Ref PushWorkflowRefs
+                'token.actions.githubusercontent.com:sub': !Ref GitHubRepos
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Component
+          Value: assets
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  AssetPushPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-assets-github-push'
+      Roles:
+        - !Ref AssetPushRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Write is confined to the asset prefix. Note the absence of
+          # s3:DeleteObject: a release only ever adds a new <tag>/ prefix, so a
+          # compromised workflow cannot erase previously published releases.
+          # (Consequence: `aws s3 sync --delete` will fail — don't use it, and
+          # re-publishing the same tag overwrites in place, with the previous
+          # object version retained for 30 days by the lifecycle rule above.)
+          - Sid: PutAssets
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+            Resource: !Sub '${StaticAssetsBucket.Arn}/${AssetPrefix}/*'
+
+          # Listing is bucket-wide rather than prefix-conditioned: `aws s3 sync`
+          # issues list calls the s3:prefix condition key can't reliably match,
+          # and listing a bucket we own carries no real exposure. The write
+          # scope above is the boundary that matters.
+          - Sid: ListBucket
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+              - s3:GetBucketLocation
+            Resource: !GetAtt StaticAssetsBucket.Arn
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+Outputs:
+
+  StaticAssetsBucketName:
+    Description: S3 bucket name for the static plot assets
+    Value: !Ref StaticAssetsBucket
+    Export:
+      Name: !Sub '${ProjectName}-shared-static-assets-bucket'
+
+  StaticAssetsBucketArn:
+    Description: S3 bucket ARN for the static plot assets
+    Value: !GetAtt StaticAssetsBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-shared-static-assets-bucket-arn'
+
+  StaticAssetsPrefix:
+    Description: Key prefix the push role may write to (objects go under <prefix>/<nlm-ckn tag>/)
+    Value: !Ref AssetPrefix
+    Export:
+      Name: !Sub '${ProjectName}-shared-static-assets-prefix'
+
+  AssetPushRoleArn:
+    Description: ARN of the nlm-ckn asset-push role (use in AWS_ASSET_PUSH_ROLE_ARN)
+    Value: !GetAtt AssetPushRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-shared-static-assets-push-role-arn'

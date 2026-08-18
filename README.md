@@ -30,7 +30,7 @@ outside this repo. `manual/` holds out-of-band stacks with no deploy wrapper
 ```
 nlm-ckn-iac/
 ├── deploy/                            # All deploy scripts, numbered by dependency wave
-│   ├── 01-deploy-account-setup.sh     # wave 1: bootstrap + shared (once per account)
+│   ├── 01-deploy-account-setup.sh     # wave 1: bootstrap + shared + static-assets (once per account)
 │   ├── 02-deploy-environment.sh       # wave 2: platform tier + frontend/arangodb/backend
 │   ├── 02-deploy-fetch.sh             # wave 2: etl ECR + fetch (parallel with the above)
 │   ├── 03-deploy-batch.sh             # wave 3: etl batch (needs 02-deploy-fetch's outputs)
@@ -38,7 +38,9 @@ nlm-ckn-iac/
 ├── account/            # One-time per-AWS-account setup: S3 buckets, GitHub OIDC, IAM role
 │   └── cloudformation/bootstrap.yaml
 ├── shared/              # Cross-environment resources: ECR repo, ArangoDB dataset S3 bucket
-│   └── cloudformation/shared-resources.yaml
+│   └── cloudformation/
+│       ├── shared-resources.yaml   # ECR repo + ArangoDB dataset S3 bucket
+│       └── static-assets.yaml      # Plot asset S3 bucket + nlm-ckn GitHub OIDC push role
 ├── environment/          # Per-environment infra: dev/stage here; sandbox separate; prod is NIH-managed
 │   ├── parameters/{dev,stage,stage-vpc}.json
 │   ├── platform/         # Shared dev/stage infra tier (secrets, security groups,
@@ -76,7 +78,7 @@ provisions and how the pieces connect:
 
 ## Deployment order
 
-- **Wave 1** — `./deploy/01-deploy-account-setup.sh` — once per AWS account
+- **Wave 1** — `./deploy/01-deploy-account-setup.sh` — once per AWS account (bootstrap, shared, static-assets)
 - **Wave 2** (parallel) — `./deploy/02-deploy-environment.sh <env>` (platform tier, then frontend/arangodb/backend service stacks) and `./deploy/02-deploy-fetch.sh` (etl ECR + fetch)
 - **Wave 3** (parallel) — `./deploy/03-deploy-batch.sh` (needs the fetch stack), `./deploy/03-deploy-monitoring.sh <env>` (needs the environment stack, optional)
 - Then, in `nlm-ckn-ui`: `./scripts/app/deploy-backend.sh`, `deploy-frontend.sh`, `deploy-dataset.sh` to ship application code onto the provisioned infrastructure (dev/stage), or `./scripts/sandbox/deploy-sandbox.sh` for the sandbox account
