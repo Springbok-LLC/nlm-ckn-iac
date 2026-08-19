@@ -64,16 +64,35 @@ echo ""
 # ============================================================================
 # Bootstrap stack
 # ============================================================================
-# Auto-detect an existing GitHub OIDC provider unless explicitly overridden.
-# AWS permits only one provider per URL per account, so creating a second fails.
+# Decide whether this stack should own the GitHub OIDC provider, unless
+# explicitly overridden. AWS permits only one provider per URL per account, so
+# creating a second fails — but "a provider exists" is NOT the right test on a
+# re-deploy: the provider it finds is usually the one this stack already owns,
+# and answering "false" makes CloudFormation delete it on the next update,
+# breaking every OIDC role in the account. The question is who owns it.
 if [[ -z "$CREATE_OIDC_PROVIDER" ]]; then
   OIDC_URL="token.actions.githubusercontent.com"
   EXISTING_OIDC=$(aws iam list-open-id-connect-providers \
     --query "OpenIDConnectProviderList[?contains(Arn, '$OIDC_URL')].Arn" \
     --output text 2>/dev/null || true)
-  if [[ -n "$EXISTING_OIDC" ]]; then
+
+  # Non-zero (hence empty) when the stack doesn't exist yet, or exists but was
+  # deployed with CreateOIDCProvider=false — in both cases this stack does not
+  # own the provider.
+  STACK_OWNED_OIDC=$(aws cloudformation describe-stack-resource \
+    --stack-name "${PROJECT_NAME}-bootstrap" \
+    --logical-resource-id GitHubOIDCProvider \
+    --region "$AWS_REGION" \
+    --query 'StackResourceDetail.PhysicalResourceId' \
+    --output text 2>/dev/null || true)
+
+  if [[ -n "$STACK_OWNED_OIDC" && "$STACK_OWNED_OIDC" != "None" ]]; then
+    CREATE_OIDC_PROVIDER=true
+    echo -e "${YELLOW}  GitHub OIDC provider is managed by this stack; keeping it${NC}"
+    echo "    $STACK_OWNED_OIDC"
+  elif [[ -n "$EXISTING_OIDC" ]]; then
     CREATE_OIDC_PROVIDER=false
-    echo -e "${YELLOW}  GitHub OIDC provider already exists; reusing it${NC}"
+    echo -e "${YELLOW}  GitHub OIDC provider exists outside this stack; reusing it${NC}"
     echo "    $EXISTING_OIDC"
   else
     CREATE_OIDC_PROVIDER=true

@@ -165,7 +165,7 @@ Resources:
         - Key: Shared
           Value: 'true'
         - Key: Purpose
-          Value: Static plot assets (SVG/HTML) for all environments
+          Value: Static plot assets SVG/HTML for all environments
         - Key: ManagedBy
           Value: CloudFormation
         - Key: Owner
