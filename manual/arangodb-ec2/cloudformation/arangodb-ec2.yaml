@@ -1,132 +1,228 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'ArangoDB on EC2 with EBS persistence and S3 restore capability'
+Description: >-
+  NLM-CKN ArangoDB on a single EC2 instance (Docker) with a retained EBS data
+  volume, first-boot dataset restore from S3, a read-only backend user, and
+  Cloud Map registration. Self-contained: every account-specific value is a
+  parameter and nothing is imported from other stacks. Derived from
+  environment/services/arangodb/cloudformation/arangodb.yaml (the dev/stage
+  template) — keep the bootstrap script in sync with it.
 
-# The bootstrap script below is mirrored in manual/arangodb-ec2/cloudformation/arangodb-ec2.yaml
-# (standalone NIH handoff copy). Apply bootstrap changes to both.
+# ==============================================================================
+# What the deploying team provides (all existing resources):
+#   - a private subnet (+ its AZ) with outbound access to S3, Secrets Manager,
+#     SSM, CloudWatch Logs, Cloud Map and the container registry
+#   - a security group admitting 8529 from the backend (and the ALB, if used)
+#   - a Cloud Map private DNS namespace (the backend resolves arangodb.<ns>)
+#   - an S3 bucket holding the dataset archive(s)
+# Optional: a pre-created instance profile, pre-existing password secrets, an
+# ALB target group, an ECR mirror of the arangodb image.
+#
+# See ../README.md for the runbook.
+# ==============================================================================
 
 Parameters:
   ProjectName:
     Type: String
-    Description: Project name for resource naming
+    Default: nlm-ckn
+    Description: Project name — prefixes SSM, Secrets Manager and log names
 
   Environment:
     Type: String
-    Default: dev
-    Description: Environment name (dev, stage, sandbox, prod)
+    Default: prod
+    AllowedPattern: '^[a-z0-9-]+$'
+    Description: Environment name — part of SSM, Secrets Manager and log names
+
+  Owner:
+    Type: String
+    Default: springbok
+    Description: Value for the Owner tag
+
+  # --- Network --------------------------------------------------------------
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet for the instance
+
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: >-
+      AZ of SubnetId (the data volume must be in the same AZ). Find it with:
+      aws ec2 describe-subnets --subnet-ids <SubnetId> --query 'Subnets[0].AvailabilityZone'
+
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group for the instance (inbound 8529 from the backend)
+
+  CloudMapNamespaceId:
+    Type: String
+    AllowedPattern: '^ns-[a-z0-9]+$'
+    Description: Existing Cloud Map private DNS namespace ID (ns-...)
+
+  CloudMapServiceName:
+    Type: String
+    Default: arangodb
+    Description: Cloud Map service name; the backend connects to <name>.<namespace>:8529
+
+  ArangoDbTargetGroupArn:
+    Type: String
+    Default: ''
+    Description: Optional ALB target group (port 8529) to register the instance in
+
+  # --- Instance -------------------------------------------------------------
+
+  Architecture:
+    Type: String
+    Default: arm64
+    AllowedValues: [arm64, x86_64]
+    Description: CPU architecture; must match InstanceType (enforced by a template rule)
+
+  InstanceType:
+    Type: String
+    Default: m7g.large
     AllowedValues:
-      - dev
-      - stage
-      - sandbox
-      - prod
+      # arm64 (Graviton)
+      - t4g.medium
+      - t4g.large
+      - t4g.xlarge
+      - m7g.large
+      - m7g.xlarge
+      - m7g.2xlarge
+      - r7g.large
+      - r7g.xlarge
+      # x86_64
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - m7i.large
+      - m7i.xlarge
+      - m7i.2xlarge
+      - r7i.large
+      - r7i.xlarge
+    Description: >-
+      ArangoDB is memory-bound; caches are sized from host RAM at boot.
+      dev ran t4g.medium, stage m7g.large, prod sizing m7g.xlarge.
 
-  # Security group ID cannot use Fn::ImportValue inside Fn::If, so it is
-  # passed as a parameter. deploy-environment.sh resolves it from either the
-  # infra stack exports (dev) or SSM prereqs (sandbox/prod).
-  ArangoDbSecurityGroupId:
+  ImageIdOverride:
     Type: String
-    Description: Security group ID for ArangoDB EC2 instance
+    Default: ''
+    Description: >-
+      Leave empty for the latest Amazon Linux 2023 AMI of the chosen
+      Architecture. An override must be AL2023-based: the bootstrap uses yum,
+      the docker package, cfn-init/cfn-signal and the CloudWatch agent.
 
-  ArangoDbUser:
-    Type: String
-    Default: nlm_ro
-    Description: >
-      ArangoDB read-only username used by the backend to authenticate.
-      This user is created in UserData with read-only grants on the app
-      databases. Root is reserved for container init + restore only.
-
-  # EBS volume size in GB for ArangoDB data.
   EbsVolumeSize:
     Type: Number
     Default: 50
     MinValue: 20
     MaxValue: 500
-    Description: EBS volume size (GB) for ArangoDB data
+    Description: Data volume size (GB)
 
-  # IAM instance profile ARN - empty in dev/stage (created by this template).
-  # In sandbox/prod this must be a pre-created ARN passed in from deploy script.
   InstanceProfileArn:
     Type: String
     Default: ''
-    Description: >
-      Pre-existing IAM instance profile ARN (sandbox/prod only).
-      Leave empty in dev/stage˙ - the profile will be created by this template.
+    Description: >-
+      Leave empty to have this stack create the instance role/profile
+      (needs CAPABILITY_IAM). To use a pre-created profile, give its ARN; its
+      role needs the permissions of InstanceRole in this template — including
+      the tag-scoped ec2:StopInstances, without which an instance replacement
+      cannot take over the data volume.
 
-  # Subnet for the ArangoDB EC2 instance.
-  # In dev, defaults to the existing dev subnet. In stage, the deploy script
-  # passes the first private subnet from the infra stack exports.
-  ArangoDbSubnetId:
-    Type: AWS::EC2::Subnet::Id
-    Description: >
-      Subnet ID for the ArangoDB EC2 instance.
-      Must be supplied by deploy-environment.sh (resolved from infra stack exports).
+  # --- ArangoDB -------------------------------------------------------------
 
-  # Availability Zone for the standalone data volume. A standalone AWS::EC2::Volume
-  # requires an explicit AZ, and it must match the AZ of ArangoDbSubnetId (an EBS
-  # volume can only attach to an instance in the same AZ). We cannot Fn::GetAtt the
-  # AZ of a subnet passed as a parameter, so deploy-environment.sh resolves it from
-  # the subnet (aws ec2 describe-subnets) and passes it here.
-  AvailabilityZone:
-    Type: AWS::EC2::AvailabilityZone::Name
-    Description: >
-      Availability Zone for the ArangoDB data volume.
-      Must match the AZ of ArangoDbSubnetId. Resolved by deploy-environment.sh.
+  ArangoImage:
+    Type: String
+    Default: arangodb:3.12
+    Description: >-
+      ArangoDB container image. Defaults to Docker Hub; point at an ECR mirror
+      if the account can't reach Docker Hub (the role then needs ECR pull).
+
+  ArangoDbUser:
+    Type: String
+    Default: nlm_ro
+    Description: Read-only user the backend authenticates as (created at boot)
+
+  CreatePasswordSecrets:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      'true' creates both password secrets with generated values:
+      /<ProjectName>/<Environment>/secrets/arangodb-root-password (root) and
+      /<ProjectName>/<Environment>/secrets/arangodb-password (read-only user,
+      also read by the backend). 'false' = they already exist under those names.
+
+  DatasetBucketName:
+    Type: String
+    Description: S3 bucket holding the dataset archive(s) (arangodump .tar.gz)
+
+  DatasetVersion:
+    Type: String
+    Default: none
+    Description: >-
+      S3 key of the dataset archive to restore on first boot, or 'none'. Seeds
+      the /<ProjectName>/<Environment>/arango/dataset-version SSM parameter.
+      Later dataset updates go through SSM Run Command (see README); keep this
+      value unchanged on stack updates so it can't roll the parameter back.
 
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
-          default: Project Configuration
-        Parameters:
-          - ProjectName
-          - Environment
+          default: Naming and tags
+        Parameters: [ProjectName, Environment, Owner]
       - Label:
-          default: Network Configuration
+          default: Network
         Parameters:
-          - ArangoDbSecurityGroupId
-          - ArangoDbSubnetId
+          - SubnetId
           - AvailabilityZone
+          - SecurityGroupId
+          - CloudMapNamespaceId
+          - CloudMapServiceName
+          - ArangoDbTargetGroupArn
       - Label:
-          default: ArangoDB Configuration
+          default: Instance
         Parameters:
-          - ArangoDbUser
-      - Label:
-          default: EC2 / Storage Configuration
-        Parameters:
+          - Architecture
+          - InstanceType
+          - ImageIdOverride
           - EbsVolumeSize
-      - Label:
-          default: Pre-existing IAM (sandbox/prod only - leave empty in dev/stage)
-        Parameters:
           - InstanceProfileArn
-
-Mappings:
-  # ArangoDB EC2 instance size per environment. ArangoDB is memory-bound: the
-  # working set plus ArangoSearch views should fit in cache, otherwise queries
-  # constantly read from EBS (observed on stage at t4g.medium, and as a
-  # multi-second cold window after every restart — 2026-06-15 postmortem).
-  #
-  # Cache sizes are NOT pinned here; the UserData derives them from the host's
-  # actual RAM (see the "cache budget" block in UserData) so they scale with the
-  # instance type automatically (4 / 8 / 16 GiB across t4g.medium / m7g.large /
-  # m7g.xlarge).
-  EnvironmentSizing:
-    dev:
-      InstanceType: t4g.medium
-    stage:
-      InstanceType: m7g.large
-    sandbox:
-      InstanceType: m7g.large
-    prod:
-      InstanceType: m7g.xlarge
+      - Label:
+          default: ArangoDB
+        Parameters:
+          - ArangoImage
+          - ArangoDbUser
+          - CreatePasswordSecrets
+          - DatasetBucketName
+          - DatasetVersion
 
 Conditions:
-  # dev + stage own their full stack; sandbox/prod use NIH-pre-created IAM
-  IsSelfManaged: !Or
-    - !Equals [!Ref Environment, 'dev']
-    - !Equals [!Ref Environment, 'stage']
+  CreateInstanceProfile: !Equals [!Ref InstanceProfileArn, '']
+  CreateSecrets: !Equals [!Ref CreatePasswordSecrets, 'true']
+  UseDefaultAmi: !Equals [!Ref ImageIdOverride, '']
+  IsArm64: !Equals [!Ref Architecture, arm64]
+
+Rules:
+  # An arm64 AMI on an x86 instance type (or vice versa) fails at launch.
+  Arm64InstanceType:
+    RuleCondition: !Equals [!Ref Architecture, arm64]
+    Assertions:
+      - Assert: !Contains
+          - [t4g.medium, t4g.large, t4g.xlarge, m7g.large, m7g.xlarge, m7g.2xlarge, r7g.large, r7g.xlarge]
+          - !Ref InstanceType
+        AssertDescription: Architecture arm64 needs a Graviton instance type (t4g/m7g/r7g)
+  X86InstanceType:
+    RuleCondition: !Equals [!Ref Architecture, x86_64]
+    Assertions:
+      - Assert: !Contains
+          - [t3.medium, t3.large, t3.xlarge, m7i.large, m7i.xlarge, m7i.2xlarge, r7i.large, r7i.xlarge]
+          - !Ref InstanceType
+        AssertDescription: Architecture x86_64 needs an x86 instance type (t3/m7i/r7i)
 
 Resources:
   # ============================================================================
-  # SSM Parameters for ArangoDB Credentials
+  # SSM parameters (read by the bootstrap, the backend and the dataset
+  # deploy process)
   # ============================================================================
   ArangoDbUserParameter:
     Type: AWS::SSM::Parameter
@@ -134,62 +230,108 @@ Resources:
       Name: !Sub '/${ProjectName}/${Environment}/arango/db-user'
       Type: String
       Value: !Ref ArangoDbUser
-      Description: ArangoDB username
+      Description: ArangoDB read-only username used by the backend
       Tags:
         Project: !Ref ProjectName
         Environment: !Ref Environment
-        Name: !Sub '${ProjectName}-${Environment}-arango-user'
+        Owner: !Ref Owner
         ManagedBy: CloudFormation
-        Owner: springbok
         Repository: nlm-ckn-iac
 
-  # Dataset version parameter - managed out-of-band by deploy-dataset.sh.
-  # Always set to 'none' here so CloudFormation never overwrites a live value
-  # on subsequent stack updates, preventing unintended dataset restores.
   DatasetVersionParameter:
     Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub '/${ProjectName}/${Environment}/arango/dataset-version'
       Type: String
-      Value: 'none'
-      Description: Current dataset version (S3 key) - updated by deploy-dataset.sh, not CloudFormation
+      Value: !Ref DatasetVersion
+      Description: Current dataset version (S3 key); advanced out-of-band after the first boot
       Tags:
         Project: !Ref ProjectName
         Environment: !Ref Environment
-        Name: !Sub '${ProjectName}-${Environment}-dataset-version'
+        Owner: !Ref Owner
         ManagedBy: CloudFormation
-        Owner: springbok
         Repository: nlm-ckn-iac
 
   # ============================================================================
-  # CloudWatch Log Group
+  # Password secrets (optional). Retained: the data volume outlives the stack
+  # and its root password lives in the volume, so losing the secret would lock
+  # the data out. Punctuation is excluded because the bootstrap embeds the
+  # passwords in arangosh JavaScript string literals.
   # ============================================================================
-  LogGroup:
-    Type: AWS::Logs::LogGroup
+  RootPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: CreateSecrets
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
-      LogGroupName: !Sub '/ec2/${ProjectName}-${Environment}-arangodb'
-      RetentionInDays: 7
+      Name: !Sub '/${ProjectName}/${Environment}/secrets/arangodb-root-password'
+      Description: ArangoDB root password (container init + restore only)
+      GenerateSecretString:
+        PasswordLength: 32
+        ExcludePunctuation: true
       Tags:
         - Key: Project
           Value: !Ref ProjectName
         - Key: Environment
           Value: !Ref Environment
         - Key: Owner
-          Value: springbok
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  ReadOnlyPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: CreateSecrets
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub '/${ProjectName}/${Environment}/secrets/arangodb-password'
+      Description: ArangoDB read-only backend user password
+      GenerateSecretString:
+        PasswordLength: 32
+        ExcludePunctuation: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
         - Key: ManagedBy
           Value: CloudFormation
         - Key: Repository
           Value: nlm-ckn-iac
 
   # ============================================================================
-  # IAM Role + Instance Profile (dev and stage)
-  # In sandbox/prod these are pre-created and passed in as InstanceProfileArn.
+  # CloudWatch log group (setup log + ArangoDB container log)
+  # ============================================================================
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ec2/${ProjectName}-${Environment}-arangodb'
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  # ============================================================================
+  # Instance role + profile (skipped when InstanceProfileArn is given; this
+  # role is then the spec for the pre-created one)
   # ============================================================================
   InstanceRole:
     Type: AWS::IAM::Role
-    Condition: IsSelfManaged
+    Condition: CreateInstanceProfile
     Properties:
-      RoleName: !Sub '${ProjectName}-${Environment}-arangodb-ec2'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -198,114 +340,68 @@ Resources:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        # SSM Session Manager access (replaces SSH)
+        # SSM Session Manager (no SSH key) + Run Command for dataset updates
         - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
-        # CloudWatch agent
         - !Sub 'arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy'
       Policies:
-        - PolicyName: S3Access
+        - PolicyName: arangodb-instance
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Effect: Allow
+              - Sid: ReadDataset
+                Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:ListBucket
-                  - s3:PutObject
                 Resource:
-                  - !Sub 'arn:${AWS::Partition}:s3:::${ProjectName}-arangodb-data-*'
-                  - !Sub 'arn:${AWS::Partition}:s3:::${ProjectName}-arangodb-data-*/*'
-        - PolicyName: SSMParameterAccess
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
+                  - !Sub 'arn:${AWS::Partition}:s3:::${DatasetBucketName}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${DatasetBucketName}/*'
+              - Sid: ReadParameters
+                Effect: Allow
                 Action:
                   - ssm:GetParameter
                   - ssm:GetParameters
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/${Environment}/arango/*'
-                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/shared/arangodb-bucket-name'
-        - PolicyName: SecretsManagerAccess
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/${ProjectName}/${Environment}/secrets/*'
-        - PolicyName: CloudWatchLogsAccess
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/${Environment}/arango/*'
+              - Sid: ReadPasswords
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/${ProjectName}/${Environment}/secrets/arangodb-*'
+              - Sid: WriteLogs
+                Effect: Allow
                 Action:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                   - logs:DescribeLogStreams
-                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ec2/${ProjectName}-${Environment}-arangodb:*'
-        - PolicyName: ServiceDiscoveryAccess
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
+                Resource: !Sub '${LogGroup.Arn}'
+              # Self-registration + boot-time reconcile of stale registrations
+              - Sid: CloudMap
+                Effect: Allow
                 Action:
                   - servicediscovery:RegisterInstance
                   - servicediscovery:DeregisterInstance
                   - servicediscovery:GetOperation
-                  # ListInstances + ec2:DescribeInstances (granted in the
-                  # EbsDataVolumeAttach policy below) let the instance reconcile
-                  # the Cloud Map service on boot: deregister any prior
-                  # registration whose EC2 instance is no longer running, which
-                  # is how a replaced instance leaves stale dead A-records behind.
                   - servicediscovery:ListInstances
-                Resource: '*'
-              - Effect: Allow
-                Action:
                   - route53:ChangeResourceRecordSets
                   - route53:CreateHealthCheck
                   - route53:DeleteHealthCheck
                   - route53:UpdateHealthCheck
+                  - ec2:DescribeInstances
+                  - ec2:DescribeVolumes
                 Resource: '*'
-        - PolicyName: AlbTargetRegistration
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
+              - Sid: AlbTargets
+                Effect: Allow
                 Action:
                   - elasticloadbalancing:RegisterTargets
                   - elasticloadbalancing:DeregisterTargets
-                  - elasticloadbalancing:DescribeTargetGroups
-                  - cloudformation:ListExports
                 Resource: '*'
-              # cfn-init reads this instance's AWS::CloudFormation::Init
-              # metadata (which holds the bootstrap script) via
-              # DescribeStackResource. Without it the stub cannot fetch the
-              # script and the instance signals failure. Scoped to this stack --
-              # the instance has no reason to read any other stack's resources.
-              - Effect: Allow
-                Action:
-                  - cloudformation:DescribeStackResource
+              # cfn-init reads the bootstrap script from this stack's metadata
+              - Sid: ReadOwnStackMetadata
+                Effect: Allow
+                Action: cloudformation:DescribeStackResource
                 Resource: !Ref AWS::StackId
-        # The instance attaches its own standalone data volume from UserData
-        # rather than via a CloudFormation AWS::EC2::VolumeAttachment, which would
-        # deadlock against this instance's CreationPolicy. Describe is account-wide
-        # (the API has no resource-level filter); attach/detach are scoped to the
-        # arangodb data volumes by the Environment tag.
-        - PolicyName: EbsDataVolumeAttach
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - ec2:DescribeVolumes
-                  # DescribeInstances backs the Cloud Map reconcile (step 7 in
-                  # UserData / the shutdown hook): it checks each registered
-                  # instance's state before deregistering dead ones. The API has
-                  # no resource-level filter, so it is account-wide like Describe.
-                  - ec2:DescribeInstances
-                Resource: '*'
-              - Effect: Allow
+              # The instance attaches its own data volume (see DataVolume)
+              - Sid: AttachDataVolume
+                Effect: Allow
                 Action:
                   - ec2:AttachVolume
                   - ec2:DetachVolume
@@ -316,39 +412,44 @@ Resources:
                   StringEquals:
                     'aws:ResourceTag/Project': !Ref ProjectName
                     'aws:ResourceTag/Environment': !Ref Environment
+              # On replacement, the new instance stops the old one so the data
+              # volume detaches cleanly instead of being yanked from a running DB.
+              - Sid: StopPriorInstance
+                Effect: Allow
+                Action: ec2:StopInstances
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/Project': !Ref ProjectName
+                    'aws:ResourceTag/Environment': !Ref Environment
       Tags:
         - Key: Project
           Value: !Ref ProjectName
         - Key: Environment
           Value: !Ref Environment
-        - Key: Name
-          Value: !Sub '${ProjectName}-${Environment}-arangodb-ec2-role'
+        - Key: Owner
+          Value: !Ref Owner
         - Key: ManagedBy
           Value: CloudFormation
-        - Key: Owner
-          Value: springbok
         - Key: Repository
           Value: nlm-ckn-iac
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
-    Condition: IsSelfManaged
+    Condition: CreateInstanceProfile
     Properties:
-      InstanceProfileName: !Sub '${ProjectName}-${Environment}-arangodb-ec2'
       Roles:
         - !Ref InstanceRole
 
   # ============================================================================
-  # Cloud Map Service for Service Discovery
-  # EC2 instance self-registers via UserData using the AWS CLI.
+  # Cloud Map service — the instance registers itself at boot
   # ============================================================================
   ServiceDiscoveryService:
     Type: AWS::ServiceDiscovery::Service
     Properties:
-      Name: arangodb
+      Name: !Ref CloudMapServiceName
       DnsConfig:
-        NamespaceId: !ImportValue
-          Fn::Sub: '${ProjectName}-${Environment}-namespace-id'
+        NamespaceId: !Ref CloudMapNamespaceId
         DnsRecords:
           - Type: A
             TTL: 60
@@ -356,17 +457,10 @@ Resources:
         FailureThreshold: 1
 
   # ============================================================================
-  # ArangoDB Data Volume (standalone, retained)
-  #
-  # Defined as a standalone AWS::EC2::Volume (NOT inline in the instance's
-  # BlockDeviceMappings) so it is NOT replaced when the EC2 instance is replaced.
-  # An InstanceType resize forces instance replacement; with the volume inline,
-  # CloudFormation would provision a brand-new EMPTY data volume and ArangoDB
-  # would come up blank. As a standalone resource with Retain policies, the SAME
-  # volume detaches from the old instance and re-attaches to the new one.
-  #
-  # DeletionPolicy/UpdateReplacePolicy Retain guard against accidental data loss
-  # if the resource is ever deleted or replaced.
+  # Data volume — standalone and retained, so an instance replacement (AMI
+  # update, instance-type change) re-attaches the SAME volume instead of
+  # starting empty. Attached by the instance itself at boot: a CloudFormation
+  # VolumeAttachment would deadlock against the instance's CreationPolicy.
   # ============================================================================
   DataVolume:
     Type: AWS::EC2::Volume
@@ -378,98 +472,72 @@ Resources:
       VolumeType: gp3
       Encrypted: true
       Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-arangodb-data'
         - Key: Project
           Value: !Ref ProjectName
         - Key: Environment
           Value: !Ref Environment
-        - Key: Name
-          Value: !Sub '${ProjectName}-${Environment}-arangodb-data'
+        - Key: Owner
+          Value: !Ref Owner
         - Key: ManagedBy
           Value: CloudFormation
-        - Key: Owner
-          Value: springbok
         - Key: Repository
           Value: nlm-ckn-iac
 
-  # ============================================================================
-  # Launch Template
-  #
-  # Carries TagSpecifications so the instance's root volume is tagged at launch.
-  # AWS::EC2::Instance cannot tag its block-device volumes directly, so a launch
-  # template is the declarative mechanism. It intentionally holds ONLY tag
-  # specifications — every other instance setting stays on the instance resource.
-  # No explicit LaunchTemplateName (ADR 0003: auto-generated names on new
-  # resources); the instance references it by logical id.
-  # ============================================================================
+  # Carries only tag specifications, so the root volume is tagged at launch.
   ArangoDbLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
       LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
         TagSpecifications:
           - ResourceType: volume
             Tags:
+              - Key: Name
+                Value: !Sub '${ProjectName}-${Environment}-arangodb-root'
               - Key: Project
                 Value: !Ref ProjectName
               - Key: Environment
                 Value: !Ref Environment
-              - Key: Name
-                Value: !Sub '${ProjectName}-${Environment}-arangodb-root'
+              - Key: Owner
+                Value: !Ref Owner
               - Key: ManagedBy
                 Value: CloudFormation
-              - Key: Owner
-                Value: springbok
               - Key: Repository
                 Value: nlm-ckn-iac
-      TagSpecifications:
-        - ResourceType: launch-template
-          Tags:
-            - Key: Project
-              Value: !Ref ProjectName
-            - Key: Environment
-              Value: !Ref Environment
-            - Key: ManagedBy
-              Value: CloudFormation
-            - Key: Owner
-              Value: springbok
-            - Key: Repository
-              Value: nlm-ckn-iac
 
   # ============================================================================
-  # EC2 Instance
+  # EC2 instance
   #
-  # Uses the latest Amazon Linux 2023 AMI (resolved at deploy time via SSM).
-  # EBS volume for data is attached separately and mounted to /var/lib/arangodb3
-  # so it survives instance replacement.
-  #
-  # UserData performs:
+  # Bootstrap (cfn-init writes it from Metadata; UserData is a thin stub
+  # because the script exceeds the 16 KB UserData limit):
   #   1. Install Docker + CloudWatch agent
-  #   2. Format + mount EBS data volume (skipped if already formatted)
-  #   3. Run ArangoDB via Docker
-  #   4. Restore dataset via arangorestore (if SSM dataset-version is set)
-  #   5. Register with Cloud Map service discovery
-  #   6. Register with ALB target group
+  #   2. Attach + mount the data volume (formats only a blank volume)
+  #   3. Run ArangoDB (caches sized from host RAM)
+  #   4. Restore DatasetVersion from S3 if the volume doesn't already hold it
+  #   4b. Create/refresh the read-only backend user
+  #   5. Register in Cloud Map; 6. optionally in the ALB target group
+  #   7. Remove stale Cloud Map registrations; 8. install a shutdown
+  #      deregistration hook
+  # Every failure path signals the CreationPolicy (explicitly or via the ERR
+  # trap), so a bad deploy fails fast with the reason in the setup log.
+  #
+  # Root-password handling in 4b: on a fresh volume root already uses the
+  # arangodb-root-password secret. The fallback branch (root still on the
+  # read-only password) only matters for volumes created before the
+  # root/read-only split in dev/stage and is a no-op otherwise.
   # ============================================================================
   ArangoDbInstance:
     Type: AWS::EC2::Instance
+    DependsOn:
+      - ArangoDbUserParameter
+      - DatasetVersionParameter
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT20M
     Metadata:
-      # The bootstrap script lives here, not in UserData: EC2 caps UserData at
-      # 16384 raw bytes (and 25600 base64-encoded) and this script is ~18 KB.
-      # Exceeding it fails at EC2-API time during the update -- after the
-      # changeset executes -- which rolls the stack back. AWS::CloudFormation::Init
-      # metadata has no such cap, and !Sub works here exactly as it did in
-      # UserData, so the script itself is unchanged. cfn-lint rule E9103 guards
-      # the UserData stub against creeping back over the limit.
-      #
-      # Step 4b (read-only backend user) -- why it is written the way it is:
-      # The backend authenticates as a read-only user (ArangoDbUser), not as
-      # root; root is reserved for container init + restore. The step is
-      # idempotent and self-healing across the existing-volume migration:
-      #   - Fresh volume: root already uses the new arangodb-root-password
-      #     secret (it was passed as ARANGO_ROOT_PASSWORD at container init).
-      #   - Pre-split volume: the on-disk root password predates the split and
-      #     still equals the OLD shared value, which now lives in the
-      #     arangodb-password (read-only user) secret. Detect that and rotate
-      #     root onto the new secret before creating the read-only user.
       AWS::CloudFormation::Init:
         config:
           files:
@@ -487,6 +555,13 @@ Resources:
                 ACCOUNT_ID="${AWS::AccountId}"
                 LOG_GROUP="/ec2/${ProjectName}-${Environment}-arangodb"
                 SD_SERVICE_ID="${ServiceDiscoveryService}"
+                DATASET_BUCKET="${DatasetBucketName}"
+                ARANGO_IMAGE="${ArangoImage}"
+                TG_ARN="${ArangoDbTargetGroupArn}"   # empty = no ALB registration
+
+                # Any unexpected failure signals CloudFormation immediately instead of
+                # leaving the stack to wait out the full PT20M CreationPolicy timeout.
+                trap '/opt/aws/bin/cfn-signal -e 1 --stack "${AWS::StackName}" --resource ArangoDbInstance --region "${AWS::Region}"' ERR
 
                 # ── 1. System setup
                 yum update -y
@@ -553,7 +628,10 @@ Resources:
 
                 # Self-attach the volume from UserData (a CFN VolumeAttachment would
                 # deadlock against the CreationPolicy; see the NOTE at end of file).
-                # Force-detach from a prior instance covers in-place replacement.
+                # On replacement the volume is still on the prior (running) instance:
+                # stop it first so ArangoDB shuts down and the filesystem is clean,
+                # then detach (force only once the stop is confirmed). Any failure
+                # here trips the ERR trap and fails the deploy.
                 DATA_VOLUME_ID="${DataVolume}"
                 IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
                   -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
@@ -565,6 +643,8 @@ Resources:
                     --query 'Volumes[0].State' --output text --region "$REGION" 2>/dev/null || echo unknown)
                   ATTACHED_TO=$(aws ec2 describe-volumes --volume-ids "$DATA_VOLUME_ID" \
                     --query 'Volumes[0].Attachments[0].InstanceId' --output text --region "$REGION" 2>/dev/null || echo None)
+                  ATTACH_STATE=$(aws ec2 describe-volumes --volume-ids "$DATA_VOLUME_ID" \
+                    --query 'Volumes[0].Attachments[0].State' --output text --region "$REGION" 2>/dev/null || echo None)
                   if [ "$ATTACHED_TO" = "$SELF_INSTANCE_ID" ]; then
                     echo "==> Volume attached to this instance (state=$VOL_STATE)"
                     break
@@ -572,9 +652,17 @@ Resources:
                     echo "==> Volume available; issuing attach..."
                     aws ec2 attach-volume --volume-id "$DATA_VOLUME_ID" \
                       --instance-id "$SELF_INSTANCE_ID" --device /dev/sdf --region "$REGION" || true
-                  elif [ "$ATTACHED_TO" != "None" ] && [ -n "$ATTACHED_TO" ]; then
-                    echo "==> Volume still attached to prior instance $ATTACHED_TO; force-detaching..."
-                    aws ec2 detach-volume --volume-id "$DATA_VOLUME_ID" --force --region "$REGION" || true
+                  elif [ "$ATTACHED_TO" != "None" ] && [ -n "$ATTACHED_TO" ] && [ "$ATTACH_STATE" = "attached" ]; then
+                    echo "==> Volume still attached to prior instance $ATTACHED_TO; stopping it..."
+                    aws ec2 stop-instances --instance-ids "$ATTACHED_TO" --region "$REGION"
+                    aws ec2 wait instance-stopped --instance-ids "$ATTACHED_TO" --region "$REGION"
+                    echo "==> Prior instance stopped; detaching volume..."
+                    if ! aws ec2 detach-volume --volume-id "$DATA_VOLUME_ID" \
+                         --instance-id "$ATTACHED_TO" --region "$REGION"; then
+                      echo "==> Normal detach failed; force-detaching from the stopped instance..."
+                      aws ec2 detach-volume --volume-id "$DATA_VOLUME_ID" \
+                        --instance-id "$ATTACHED_TO" --force --region "$REGION"
+                    fi
                   fi
                   echo "  waiting for attach... attempt $i/30 (state=$VOL_STATE attached_to=$ATTACHED_TO)"
                   sleep 10
@@ -669,7 +757,7 @@ Resources:
                   --log-opt awslogs-region="$REGION" \
                   --log-opt awslogs-group="$LOG_GROUP" \
                   --log-opt awslogs-stream="arangodb/$INSTANCE_ID" \
-                  arangodb:3.12 \
+                  "$ARANGO_IMAGE" \
                   --rocksdb.block-cache-size "$BLOCK_CACHE_BYTES" \
                   --arangosearch.columns-cache-limit "$COLUMNS_CACHE_BYTES"
                 set -x
@@ -701,11 +789,7 @@ Resources:
                 # Restore the SSM-recorded dataset version on first boot / replacement.
                 echo "==> Dataset restore check"
 
-                ARANGODB_S3_BUCKET=$(aws ssm get-parameter \
-                  --name "/$PROJECT_NAME/shared/arangodb-bucket-name" \
-                  --query 'Parameter.Value' \
-                  --output text \
-                  --region "$REGION")
+                ARANGODB_S3_BUCKET="$DATASET_BUCKET"
 
                 CURRENT_VERSION=$(aws ssm get-parameter \
                   --name "/$PROJECT_NAME/$ENVIRONMENT/arango/dataset-version" \
@@ -758,7 +842,7 @@ Resources:
                   docker run --rm \
                     --network host \
                     -v "$DUMP_DIR:/dump" \
-                    arangodb:3.12 \
+                    "$ARANGO_IMAGE" \
                     arangorestore \
                     --server.endpoint tcp://127.0.0.1:8529 \
                     --server.password "$ARANGO_ROOT_PASSWORD" \
@@ -775,7 +859,7 @@ Resources:
                 fi
 
                 # 4b. Create/refresh the read-only backend user (rationale: see the
-                # NOTE above the UserData property).
+                # ArangoDbInstance Metadata comment).
                 echo "==> Ensuring read-only backend user '${ArangoDbUser}'"
 
                 # Read-only (backend) user password: the EXISTING arangodb-password secret.
@@ -896,17 +980,16 @@ Resources:
                   --attributes "AWS_INSTANCE_IPV4=$PRIVATE_IP,AWS_INSTANCE_PORT=8529" \
                   --region "$REGION"
 
-                # ── 6. Register with ALB target group
-                TG_ARN=$(aws cloudformation list-exports \
-                  --region "$REGION" \
-                  --query "Exports[?Name=='${ProjectName}-${Environment}-arangodb-tg-arn'].Value" \
-                  --output text)
-
-                echo "==> Registering with ALB target group ($TG_ARN)"
-                aws elbv2 register-targets \
-                  --target-group-arn "$TG_ARN" \
-                  --targets "Id=$INSTANCE_ID,Port=8529" \
-                  --region "$REGION"
+                # ── 6. Register with ALB target group (optional)
+                if [ -n "$TG_ARN" ]; then
+                  echo "==> Registering with ALB target group ($TG_ARN)"
+                  aws elbv2 register-targets \
+                    --target-group-arn "$TG_ARN" \
+                    --targets "Id=$INSTANCE_ID,Port=8529" \
+                    --region "$REGION"
+                else
+                  echo "==> No ArangoDbTargetGroupArn given, skipping ALB registration"
+                fi
 
                 # ── 7. Reconcile Cloud Map: drop stale (dead) registrations
                 # A replaced instance leaves its old Cloud Map A-record behind; the
@@ -996,53 +1079,39 @@ Resources:
                   --stack "${AWS::StackName}" \
                   --resource ArangoDbInstance \
                   --region "${AWS::Region}"
-
-    DependsOn:
-      - ArangoDbUserParameter
-      - DatasetVersionParameter
-    CreationPolicy:
-      ResourceSignal:
-        Timeout: PT20M
     Properties:
-      # arm64 AMI — matches t4g (Graviton2) instance family.
-      # If switching back to t3/x86, change to: al2023-ami-kernel-default-x86_64
-      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
-      InstanceType: !FindInMap [EnvironmentSizing, !Ref Environment, InstanceType]
-      SubnetId: !Ref ArangoDbSubnetId
+      ImageId: !If
+        - UseDefaultAmi
+        - !If
+          - IsArm64
+          - '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
+          - '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+        - !Ref ImageIdOverride
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
       SecurityGroupIds:
-        - !Ref ArangoDbSecurityGroupId
+        - !Ref SecurityGroupId
       IamInstanceProfile: !If
-        - IsSelfManaged
+        - CreateInstanceProfile
         - !Ref InstanceProfile
         - !Ref InstanceProfileArn
-      # Only used to carry volume TagSpecifications (see ArangoDbLaunchTemplate).
-      # Attaching a launch template REPLACES the instance on the next deploy;
-      # the ArangoDB data survives on the retained standalone DataVolume.
       LaunchTemplate:
         LaunchTemplateId: !Ref ArangoDbLaunchTemplate
         Version: !GetAtt ArangoDbLaunchTemplate.LatestVersionNumber
       BlockDeviceMappings:
-        # Root volume — OS only. The ArangoDB data volume is a standalone
-        # AWS::EC2::Volume (see DataVolume; attached by UserData) so it
-        # survives instance replacement (e.g. an InstanceType resize).
+        # Root volume — OS only; data lives on DataVolume
         - DeviceName: /dev/xvda
           Ebs:
             VolumeSize: 20
             VolumeType: gp3
             DeleteOnTermination: true
             Encrypted: true
-      # Thin stub only -- the real script is in this resource's
-      # AWS::CloudFormation::Init metadata (see above). Keep this under the
-      # 16384-byte raw UserData cap; E9103 enforces it.
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -euxo pipefail
-
-          # cfn-init writes /opt/nlm-ckn-bootstrap.sh from this instance's
-          # metadata. If that fails the bootstrap script never lands, so nothing
-          # else would ever signal the CreationPolicy -- signal failure here
-          # rather than let the stack hang until the PT20M timeout.
+          # If cfn-init can't write the bootstrap script nothing else would
+          # signal the CreationPolicy, so signal failure here.
           if ! /opt/aws/bin/cfn-init -v \
                --stack ${AWS::StackName} \
                --resource ArangoDbInstance \
@@ -1053,52 +1122,42 @@ Resources:
               --region ${AWS::Region}
             exit 1
           fi
-
-          # The script signals the CreationPolicy itself, on success and failure.
           exec /opt/nlm-ckn-bootstrap.sh
       Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-arangodb'
         - Key: Project
           Value: !Ref ProjectName
         - Key: Environment
           Value: !Ref Environment
-        - Key: Name
-          Value: !Sub '${ProjectName}-${Environment}-arangodb'
+        - Key: Owner
+          Value: !Ref Owner
         - Key: ManagedBy
           Value: CloudFormation
-        - Key: Owner
-          Value: springbok
         - Key: Repository
           Value: nlm-ckn-iac
 
-# NOTE: the standalone DataVolume is attached by the instance itself from
-# UserData (see the "Attach the standalone data volume" block). We deliberately
-# do NOT use an AWS::EC2::VolumeAttachment resource here: it would depend on the
-# instance reaching CREATE_COMPLETE, but the instance's CreationPolicy only
-# signals success after the volume is mounted -> a deadlock that times out and
-# rolls back (the original UPDATE_FAILED). Self-attach from UserData also lets us
-# force-detach the volume from a prior instance during an in-place replacement.
-
 Outputs:
   InstanceId:
-    Description: ArangoDB EC2 instance ID
+    Description: ArangoDB EC2 instance ID (use with SSM Session Manager / Run Command)
     Value: !Ref ArangoDbInstance
-    Export:
-      Name: !Sub '${ProjectName}-${Environment}-arangodb-instance-id'
 
   PrivateIp:
-    Description: ArangoDB EC2 private IP
+    Description: ArangoDB private IP
     Value: !GetAtt ArangoDbInstance.PrivateIp
-    Export:
-      Name: !Sub '${ProjectName}-${Environment}-arangodb-private-ip'
 
-  ServiceDiscoveryDnsName:
-    Description: Service discovery DNS name
-    Value: !Sub 'arangodb.${ProjectName}-${Environment}.local'
-    Export:
-      Name: !Sub '${ProjectName}-${Environment}-arangodb-dns'
+  DataVolumeId:
+    Description: Retained data volume (survives instance replacement and stack deletion)
+    Value: !Ref DataVolume
 
-  DatasetVersionParameter:
-    Description: SSM parameter name for dataset version
+  CloudMapServiceId:
+    Description: Cloud Map service the instance registers in
+    Value: !Ref ServiceDiscoveryService
+
+  DatasetVersionParameterName:
+    Description: SSM parameter holding the restored dataset version
     Value: !Ref DatasetVersionParameter
-    Export:
-      Name: !Sub '${ProjectName}-${Environment}-dataset-version-param'
+
+  ReadOnlyPasswordSecretName:
+    Description: Secret the backend reads for the read-only user's password
+    Value: !Sub '/${ProjectName}/${Environment}/secrets/arangodb-password'
