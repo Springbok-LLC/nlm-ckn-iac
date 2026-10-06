@@ -64,10 +64,14 @@ nlm-ckn-iac/
 │   ├── redirect/         # Standalone CloudFront redirect (cell-kn.org/nlm-ckn.org → stage)
 │   │   ├── cloudformation/redirect.yaml
 │   │   └── parameters.json
-│   └── frontend-alb/     # NIH handoff: serve the frontend from an ALB where CloudFront isn't allowed
-│       ├── cloudformation/frontend-alb.yaml
+│   ├── frontend-alb/     # NIH handoff: serve the frontend from an ALB where CloudFront isn't allowed
+│   │   ├── cloudformation/frontend-alb.yaml
+│   │   ├── parameters.example.json
+│   │   └── test-in-dev.sh  # exercise it against springbok dev before handoff
+│   └── arangodb-ec2/     # NIH handoff: standalone ArangoDB EC2 stack (no cross-stack imports)
+│       ├── cloudformation/arangodb-ec2.yaml
 │       ├── parameters.example.json
-│       └── test-in-dev.sh  # exercise it against springbok dev before handoff
+│       └── test-in-dev.sh  # deploy a side-by-side copy in springbok dev before handoff
 ├── ops/                  # Cross-cutting operator scripts
 │   └── scripts/smoke-test.sh
 └── docs/                 # Cutover runbook (old cell-kn → nlm-ckn)
