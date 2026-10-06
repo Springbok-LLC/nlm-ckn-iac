@@ -61,9 +61,13 @@ nlm-ckn-iac/
 ├── manual/               # Out-of-band stacks, deployed by hand, no deploy/ wrapper
 │   ├── network/          # VPC (mostly unused — VPC/subnets are normally NIH-provided params)
 │   │   └── cloudformation/vpc.yaml
-│   └── redirect/         # Standalone CloudFront redirect (cell-kn.org/nlm-ckn.org → stage)
-│       ├── cloudformation/redirect.yaml
-│       └── parameters.json
+│   ├── redirect/         # Standalone CloudFront redirect (cell-kn.org/nlm-ckn.org → stage)
+│   │   ├── cloudformation/redirect.yaml
+│   │   └── parameters.json
+│   └── frontend-alb/     # NIH handoff: serve the frontend from an ALB where CloudFront isn't allowed
+│       ├── cloudformation/frontend-alb.yaml
+│       ├── parameters.example.json
+│       └── test-in-dev.sh  # exercise it against springbok dev before handoff
 ├── ops/                  # Cross-cutting operator scripts
 │   └── scripts/smoke-test.sh
 └── docs/                 # Cutover runbook (old cell-kn → nlm-ckn)

@@ -141,8 +141,9 @@ Resources:
     Properties:
       # arm64 AMI ? matches t4g (Graviton2) instance family.
       # If switching back to t3/x86, change to: al2023-ami-kernel-default-x86_64
-      #ImageId: ami-0b7590cd0375fb3d8
-      ImageId: ami-0419af41559343838
+      # Resolved at deploy time via SSM (matches the comment above); the
+      # previously hardcoded ami-0419af41559343838 has been deregistered by AWS.
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
       InstanceType: !Ref InstanceType
       KeyName: chenx21-piv
       SubnetId:  subnet-0a0aacec5e8ceefcd

@@ -1,0 +1,711 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  NLM-CKN frontend without CloudFront — serves the frontend S3 bucket (React app
+  + plot assets) and the /arango_api/* backend from an existing Application Load
+  Balancer. Static content reaches S3 through a private S3 interface VPC
+  endpoint registered as IP targets; no compute is added. Self-contained: every
+  account-specific value is a parameter, nothing is imported from other stacks.
+
+# ==============================================================================
+# Request flow
+#
+#   browser ──HTTPS──▶ ALB :443 listener
+#                        ├─ /arango_api/*         → existing backend target group
+#                        ├─ extension-less paths  → rewrite to /index.html ─┐
+#                        │  (client-side routes)                            ├─▶ S3 interface
+#                        └─ everything else       → as-is ─────────────────┘   endpoint (IPs)
+#                                                                               → frontend bucket
+#
+# The two S3 rules rewrite the Host header to the bucket's virtual-hosted name,
+# so the bucket name does not have to match the site's domain. S3 returns the
+# objects with their stored metadata (Content-Type, Cache-Control and, for the
+# plot assets, Content-Encoding: gzip), so there is no object size limit and no
+# runtime to patch.
+#
+# What this stack does NOT do (the deploying team owns these):
+#   - the frontend bucket's policy: add the statement from the
+#     BucketPolicyStatement output (a bucket has exactly one policy, owned by
+#     the stack that created the bucket)
+#   - the ALB security group: must allow inbound 443 from clients and outbound
+#     443 to the endpoint security group this stack creates
+#   - DNS: point the site's hostname at the ALB
+#
+# See ../README.md for the full handoff runbook.
+# ==============================================================================
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: nlm-ckn
+    Description: Project name for resource naming and tagging
+
+  Environment:
+    Type: String
+    Default: prod
+    Description: Environment name for resource naming and tagging (e.g. dev, prod)
+
+  Owner:
+    Type: String
+    Default: springbok
+    Description: Value for the Owner tag
+
+  # --- Existing resources --------------------------------------------------
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC that contains the ALB
+
+  EndpointSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >-
+      Subnets for the S3 interface endpoint's network interfaces — one per AZ,
+      normally the private subnets. Each subnet adds one IP target.
+
+  LoadBalancerArn:
+    Type: String
+    AllowedPattern: '^arn:aws[a-z-]*:elasticloadbalancing:.+:loadbalancer/app/.+$'
+    Description: ARN of the existing internet-facing Application Load Balancer
+
+  LoadBalancerSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >-
+      Security group attached to the ALB. The endpoint security group admits
+      443 only from this group.
+
+  BackendTargetGroupArn:
+    Type: String
+    AllowedPattern: '^arn:aws[a-z-]*:elasticloadbalancing:.+:targetgroup/.+$'
+    Description: Existing target group for the Django backend (serves /arango_api/*)
+
+  FrontendBucketName:
+    Type: String
+    Description: >-
+      Existing S3 bucket holding the built frontend (index.html at the root)
+      and the plot assets under plots/. Must be in this region and encrypted
+      with SSE-S3 (SSE-KMS objects cannot be read anonymously via the endpoint).
+
+  # --- HTTPS listener ------------------------------------------------------
+
+  ExistingHttpsListenerArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Leave empty to create a new HTTPS listener on ListenerPort. If the ALB
+      already has a listener on that port, give its ARN and the rules are
+      attached to it instead (CertificateArn is then ignored).
+
+  ListenerPort:
+    Type: Number
+    Default: 443
+    Description: Port for the new HTTPS listener (ignored with ExistingHttpsListenerArn)
+
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: >-
+      ACM certificate (in this region) for the site hostname. Required when
+      creating a new listener.
+
+  SslPolicy:
+    Type: String
+    Default: ELBSecurityPolicy-TLS13-1-2-2021-06
+    Description: TLS policy for the new HTTPS listener
+
+  ApiRulePriority:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 50000
+    Description: >-
+      Listener rule priorities (lower = evaluated first). Must keep the order
+      Api < Spa < Static; change only if they collide with existing rules.
+
+  SpaRulePriority:
+    Type: Number
+    Default: 110
+    MinValue: 1
+    MaxValue: 50000
+    Description: See ApiRulePriority
+
+  StaticRulePriority:
+    Type: Number
+    Default: 120
+    MinValue: 1
+    MaxValue: 50000
+    Description: See ApiRulePriority
+
+  HttpListenerArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional ARN of the ALB's existing port-80 listener. When set, a rule is
+      added that 301-redirects all HTTP requests to HTTPS on ListenerPort.
+
+  # --- Optional: S3 endpoint reuse -----------------------------------------
+
+  ExistingS3EndpointId:
+    Type: String
+    Default: ''
+    Description: >-
+      Leave empty to create a dedicated S3 interface endpoint (private DNS off,
+      so other S3 traffic in the VPC is unaffected). If the VPC already has an
+      S3 *interface* endpoint, give its ID to reuse it — its security group must
+      then admit 443 from the ALB security group, and its endpoint policy must
+      allow s3:GetObject on the frontend bucket.
+
+  # --- Optional: WAF -------------------------------------------------------
+
+  CreateWebAcl:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Create a REGIONAL WAF web ACL (API rate limit + AWS managed rules, the
+      same rules the CloudFront deployment uses) and associate it with the ALB.
+      An ALB can have only one web ACL — leave 'false' if one is already
+      associated (e.g. by Firewall Manager).
+
+  ApiRateLimitPer5Min:
+    Type: Number
+    Default: 3000
+    MinValue: 100
+    Description: Max /arango_api/* requests per client IP per 5 minutes before WAF blocks it
+
+  ManagedRulesMode:
+    Type: String
+    Default: Count
+    AllowedValues: [Count, Block]
+    Description: Count = log matches only; Block = enforce the AWS managed rule groups
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming and tags
+        Parameters: [ProjectName, Environment, Owner]
+      - Label:
+          default: Existing resources
+        Parameters:
+          - VpcId
+          - EndpointSubnetIds
+          - LoadBalancerArn
+          - LoadBalancerSecurityGroupId
+          - BackendTargetGroupArn
+          - FrontendBucketName
+      - Label:
+          default: HTTPS listener
+        Parameters:
+          - ExistingHttpsListenerArn
+          - ListenerPort
+          - CertificateArn
+          - SslPolicy
+          - ApiRulePriority
+          - SpaRulePriority
+          - StaticRulePriority
+          - HttpListenerArn
+      - Label:
+          default: S3 endpoint
+        Parameters: [ExistingS3EndpointId]
+      - Label:
+          default: WAF
+        Parameters: [CreateWebAcl, ApiRateLimitPer5Min, ManagedRulesMode]
+
+Conditions:
+  CreateListener: !Equals [!Ref ExistingHttpsListenerArn, '']
+  CreateEndpoint: !Equals [!Ref ExistingS3EndpointId, '']
+  RedirectHttp: !Not [!Equals [!Ref HttpListenerArn, '']]
+  ShouldCreateWebAcl: !Equals [!Ref CreateWebAcl, 'true']
+  BlockManagedRules: !Equals [!Ref ManagedRulesMode, 'Block']
+
+Rules:
+  CertificateRequiredForNewListener:
+    RuleCondition: !Equals [!Ref ExistingHttpsListenerArn, '']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref CertificateArn, '']]
+        AssertDescription: CertificateArn is required unless ExistingHttpsListenerArn is given
+
+Resources:
+  # ============================================================================
+  # S3 interface endpoint
+  #
+  # Private DNS is OFF: enabling it would change how every S3 hostname resolves
+  # inside the VPC. The ALB addresses the endpoint by IP and sets the Host
+  # header itself, so it needs no DNS. The endpoint policy limits it to reading
+  # the frontend bucket.
+  # ============================================================================
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoint
+    Properties:
+      GroupDescription: !Sub '${ProjectName}-${Environment} S3 frontend endpoint - HTTPS from the ALB only'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroupId
+          Description: HTTPS from the ALB
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-s3-frontend-endpoint-sg'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  S3InterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref VpcId
+      SubnetIds: !Ref EndpointSubnetIds
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
+      PrivateDnsEnabled: false
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ReadFrontendBucketOnly
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${FrontendBucketName}/*'
+
+  # ============================================================================
+  # S3 target group
+  #
+  # IP targets = the endpoint's network-interface IPs, registered by
+  # EndpointTargetRegistration below (CloudFormation does not expose the IPs).
+  # Health checks hit S3 by bare IP with no bucket Host header, so S3 answers
+  # 4xx; any HTTP response proves the endpoint is reachable, hence 200-499.
+  # ============================================================================
+  S3TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      TargetType: ip
+      Protocol: HTTPS
+      Port: 443
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTPS
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200-499
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-s3-frontend-tg'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  # ============================================================================
+  # Endpoint IP registration (custom resource)
+  #
+  # Looks up the endpoint's ENI private IPs and keeps the target group's
+  # targets equal to them: registers on create/update, deregisters stale IPs on
+  # update, deregisters everything on delete. The IPs are fixed for the life of
+  # the endpoint, so this only runs on stack operations.
+  # ============================================================================
+  TargetRegistrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: register-endpoint-targets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DescribeEndpoint
+                Effect: Allow
+                Action:
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:DescribeNetworkInterfaces
+                  - elasticloadbalancing:DescribeTargetHealth
+                Resource: '*'
+              - Sid: ManageTargets
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:RegisterTargets
+                  - elasticloadbalancing:DeregisterTargets
+                Resource: !Ref S3TargetGroup
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  TargetRegistrationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-${Environment}-s3-endpoint-targets'
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  TargetRegistrationFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: TargetRegistrationLogGroup
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-s3-endpoint-targets'
+      Description: Registers the S3 interface endpoint's IPs in the frontend ALB target group
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt TargetRegistrationRole.Arn
+      Timeout: 120
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+
+          import boto3
+
+          ec2 = boto3.client("ec2")
+          elbv2 = boto3.client("elbv2")
+
+
+          def respond(event, context, status, data=None, reason=None):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch log stream {context.log_stream_name}",
+                  "PhysicalResourceId": event.get("PhysicalResourceId")
+                  or f"{event['ResourceProperties']['TargetGroupArn']}|{event['ResourceProperties']['EndpointId']}",
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "Data": data or {},
+              }).encode()
+              req = urllib.request.Request(
+                  event["ResponseURL"], data=body, method="PUT",
+                  headers={"Content-Type": "", "Content-Length": str(len(body))},
+              )
+              urllib.request.urlopen(req, timeout=30)
+
+
+          def endpoint_ips(endpoint_id):
+              eni_ids = ec2.describe_vpc_endpoints(VpcEndpointIds=[endpoint_id])[
+                  "VpcEndpoints"][0]["NetworkInterfaceIds"]
+              if not eni_ids:
+                  raise RuntimeError(f"{endpoint_id} has no network interfaces (is it an Interface endpoint?)")
+              enis = ec2.describe_network_interfaces(NetworkInterfaceIds=eni_ids)["NetworkInterfaces"]
+              return sorted(eni["PrivateIpAddress"] for eni in enis)
+
+
+          def registered_ips(tg_arn):
+              health = elbv2.describe_target_health(TargetGroupArn=tg_arn)["TargetHealthDescriptions"]
+              return {t["Target"]["Id"] for t in health}
+
+
+          def targets(ips, port):
+              return [{"Id": ip, "Port": port} for ip in ips]
+
+
+          def handler(event, context):
+              print(json.dumps({k: v for k, v in event.items() if k != "ResponseURL"}))
+              props = event["ResourceProperties"]
+              tg_arn, port = props["TargetGroupArn"], int(props["Port"])
+              try:
+                  if event["RequestType"] == "Delete":
+                      current = registered_ips(tg_arn)
+                      if current:
+                          elbv2.deregister_targets(TargetGroupArn=tg_arn, Targets=targets(current, port))
+                      respond(event, context, "SUCCESS")
+                      return
+
+                  ips = endpoint_ips(props["EndpointId"])
+                  elbv2.register_targets(TargetGroupArn=tg_arn, Targets=targets(ips, port))
+                  stale = registered_ips(tg_arn) - set(ips)
+                  if stale:
+                      elbv2.deregister_targets(TargetGroupArn=tg_arn, Targets=targets(stale, port))
+                  respond(event, context, "SUCCESS", {"IpAddresses": ",".join(ips)})
+              except Exception as exc:  # always answer CloudFormation, or the stack hangs for an hour
+                  print(f"FAILED: {exc!r}")
+                  # A failed Delete must not wedge stack deletion (e.g. target group already gone).
+                  status = "SUCCESS" if event["RequestType"] == "Delete" else "FAILED"
+                  respond(event, context, status, reason=str(exc)[:500])
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  EndpointTargetRegistration:
+    Type: Custom::S3EndpointTargets
+    Properties:
+      ServiceToken: !GetAtt TargetRegistrationFunction.Arn
+      TargetGroupArn: !Ref S3TargetGroup
+      EndpointId: !If [CreateEndpoint, !Ref S3InterfaceEndpoint, !Ref ExistingS3EndpointId]
+      Port: 443
+
+  # ============================================================================
+  # HTTPS listener + rules
+  #
+  # Rule transforms can't be attached to a listener's default action, so the
+  # S3 routes are explicit rules and the default action is a plain 404.
+  # ============================================================================
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateListener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancerArn
+      Port: !Ref ListenerPort
+      Protocol: HTTPS
+      SslPolicy: !Ref SslPolicy
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: '404'
+            ContentType: text/plain
+            MessageBody: Not found
+
+  # /arango_api/* → Django backend (the only dynamic path; mirrors the
+  # CloudFront /arango_api/* behavior).
+  ApiRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !If [CreateListener, !Ref HttpsListener, !Ref ExistingHttpsListenerArn]
+      Priority: !Ref ApiRulePriority
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /arango_api/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroupArn
+
+  # Client-side routes: a final path segment with no '.' (including '/') is an
+  # app route, not a file — serve /index.html so the React router handles it.
+  # Same test as the CloudFront SpaRoutingFunction. Real files (with an
+  # extension) fall through to StaticRule and keep their true status codes.
+  SpaRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: EndpointTargetRegistration
+    Properties:
+      ListenerArn: !If [CreateListener, !Ref HttpsListener, !Ref ExistingHttpsListenerArn]
+      Priority: !Ref SpaRulePriority
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            RegexValues:
+              - '^(.*/)?[^./]*$'
+      Transforms:
+        - Type: host-header-rewrite
+          HostHeaderRewriteConfig:
+            Rewrites:
+              - Regex: '^.*$'
+                Replace: !Sub '${FrontendBucketName}.s3.${AWS::Region}.amazonaws.com'
+        - Type: url-rewrite
+          UrlRewriteConfig:
+            Rewrites:
+              - Regex: '^.*$'
+                Replace: /index.html
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref S3TargetGroup
+
+  # Everything else → the object at that key (JS/CSS bundles, images,
+  # plots/<tag>/*.svg|html, plotly.js, ...).
+  StaticRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: EndpointTargetRegistration
+    Properties:
+      ListenerArn: !If [CreateListener, !Ref HttpsListener, !Ref ExistingHttpsListenerArn]
+      Priority: !Ref StaticRulePriority
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /*
+      Transforms:
+        - Type: host-header-rewrite
+          HostHeaderRewriteConfig:
+            Rewrites:
+              - Regex: '^.*$'
+                Replace: !Sub '${FrontendBucketName}.s3.${AWS::Region}.amazonaws.com'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref S3TargetGroup
+
+  # Optional: HTTP → HTTPS on the ALB's existing port-80 listener.
+  HttpRedirectRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: RedirectHttp
+    Properties:
+      ListenerArn: !Ref HttpListenerArn
+      Priority: !Ref ApiRulePriority
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /*
+      Actions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: !Ref ListenerPort
+            StatusCode: HTTP_301
+
+  # ============================================================================
+  # Optional WAF (REGIONAL) — same layers as the CloudFront web ACL:
+  #   1. per-IP rate limit on /arango_api/* (always Block)
+  #   2. AWS managed Common + KnownBadInputs groups (Count until reviewed)
+  # ============================================================================
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Condition: ShouldCreateWebAcl
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-alb-waf'
+      Scope: REGIONAL
+      Description: !Sub 'WAF for the ${ProjectName} ${Environment} frontend ALB'
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub '${ProjectName}-${Environment}-alb-waf'
+      Rules:
+        - Name: ApiRateLimit
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref ApiRateLimitPer5Min
+              AggregateKeyType: IP
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch:
+                    UriPath: {}
+                  PositionalConstraint: STARTS_WITH
+                  SearchString: /arango_api/
+                  TextTransformations:
+                    - Priority: 0
+                      Type: URL_DECODE
+                    - Priority: 1
+                      Type: LOWERCASE
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub '${ProjectName}-${Environment}-alb-api-rate-limit'
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction: !If [BlockManagedRules, {None: {}}, {Count: {}}]
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub '${ProjectName}-${Environment}-alb-common-rules'
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 2
+          OverrideAction: !If [BlockManagedRules, {None: {}}, {Count: {}}]
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub '${ProjectName}-${Environment}-alb-known-bad-inputs'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  WebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Condition: ShouldCreateWebAcl
+    Properties:
+      ResourceArn: !Ref LoadBalancerArn
+      WebACLArn: !GetAtt WebAcl.Arn
+
+Outputs:
+  S3EndpointId:
+    Description: S3 interface endpoint the ALB reads the bucket through
+    Value: !If [CreateEndpoint, !Ref S3InterfaceEndpoint, !Ref ExistingS3EndpointId]
+
+  S3EndpointIps:
+    Description: Endpoint IPs registered in the S3 target group
+    Value: !GetAtt EndpointTargetRegistration.IpAddresses
+
+  S3TargetGroupArn:
+    Description: Target group fronting the S3 endpoint
+    Value: !Ref S3TargetGroup
+
+  HttpsListenerArn:
+    Description: Listener the frontend rules are attached to
+    Value: !If [CreateListener, !Ref HttpsListener, !Ref ExistingHttpsListenerArn]
+
+  # Paste into the frontend bucket's policy (Statement array). Anonymous
+  # GetObject is allowed ONLY for requests arriving through this endpoint, which
+  # S3 Block Public Access treats as non-public, so BPA can stay fully on.
+  BucketPolicyStatement:
+    Description: Statement to add to the frontend bucket policy
+    Value: !Sub
+      - >-
+        {"Sid": "AllowFrontendAlbViaVpce", "Effect": "Allow", "Principal": "*",
+        "Action": "s3:GetObject", "Resource": "arn:${AWS::Partition}:s3:::${FrontendBucketName}/*",
+        "Condition": {"StringEquals": {"aws:SourceVpce": "${Vpce}"}}}
+      - Vpce: !If [CreateEndpoint, !Ref S3InterfaceEndpoint, !Ref ExistingS3EndpointId]
