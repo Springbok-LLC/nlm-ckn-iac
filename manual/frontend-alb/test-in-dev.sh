@@ -16,7 +16,10 @@ ENV=dev
 HOST=dev.nlm-ckn.org
 STACK="${PROJECT}-${ENV}-frontend-alb-test"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SID=AllowFrontendAlbViaVpce   # Sid of the template's BucketPolicyStatement output
+# The template's BucketPolicyStatement uses Sid AllowFrontendAlbViaVpce; `up`
+# renames it to this test-only Sid so `down` never removes a statement that
+# belongs to another deployment.
+SID=AllowFrontendAlbTestInDev
 
 export AWS_REGION=$REGION
 
@@ -72,7 +75,7 @@ up() {
 
   policy=$(current_policy_without_test)   # aborts here (set -e) if the read fails
   aws s3api put-bucket-policy --bucket "$BUCKET" \
-    --policy "$(jq -c --argjson s "$stmt" '.Statement += [$s]' <<<"$policy")"
+    --policy "$(jq -c --argjson s "$stmt" --arg sid "$SID" '.Statement += [$s | .Sid = $sid]' <<<"$policy")"
   echo "Deployed ${STACK}; bucket policy statement added to ${BUCKET}."
 }
 
