@@ -123,7 +123,9 @@ Parameters:
     Description: >-
       Leave empty to have this stack create the instance role/profile
       (needs CAPABILITY_IAM). To use a pre-created profile, give its ARN; its
-      role needs the permissions of InstanceRole in this template.
+      role needs the permissions of InstanceRole in this template — including
+      the tag-scoped ec2:StopInstances, without which an instance replacement
+      cannot take over the data volume.
 
   # --- ArangoDB -------------------------------------------------------------
 
@@ -410,6 +412,16 @@ Resources:
                   StringEquals:
                     'aws:ResourceTag/Project': !Ref ProjectName
                     'aws:ResourceTag/Environment': !Ref Environment
+              # On replacement, the new instance stops the old one so the data
+              # volume detaches cleanly instead of being yanked from a running DB.
+              - Sid: StopPriorInstance
+                Effect: Allow
+                Action: ec2:StopInstances
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/Project': !Ref ProjectName
+                    'aws:ResourceTag/Environment': !Ref Environment
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -616,7 +628,10 @@ Resources:
 
                 # Self-attach the volume from UserData (a CFN VolumeAttachment would
                 # deadlock against the CreationPolicy; see the NOTE at end of file).
-                # Force-detach from a prior instance covers in-place replacement.
+                # On replacement the volume is still on the prior (running) instance:
+                # stop it first so ArangoDB shuts down and the filesystem is clean,
+                # then detach (force only once the stop is confirmed). Any failure
+                # here trips the ERR trap and fails the deploy.
                 DATA_VOLUME_ID="${DataVolume}"
                 IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
                   -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
@@ -628,6 +643,8 @@ Resources:
                     --query 'Volumes[0].State' --output text --region "$REGION" 2>/dev/null || echo unknown)
                   ATTACHED_TO=$(aws ec2 describe-volumes --volume-ids "$DATA_VOLUME_ID" \
                     --query 'Volumes[0].Attachments[0].InstanceId' --output text --region "$REGION" 2>/dev/null || echo None)
+                  ATTACH_STATE=$(aws ec2 describe-volumes --volume-ids "$DATA_VOLUME_ID" \
+                    --query 'Volumes[0].Attachments[0].State' --output text --region "$REGION" 2>/dev/null || echo None)
                   if [ "$ATTACHED_TO" = "$SELF_INSTANCE_ID" ]; then
                     echo "==> Volume attached to this instance (state=$VOL_STATE)"
                     break
@@ -635,9 +652,17 @@ Resources:
                     echo "==> Volume available; issuing attach..."
                     aws ec2 attach-volume --volume-id "$DATA_VOLUME_ID" \
                       --instance-id "$SELF_INSTANCE_ID" --device /dev/sdf --region "$REGION" || true
-                  elif [ "$ATTACHED_TO" != "None" ] && [ -n "$ATTACHED_TO" ]; then
-                    echo "==> Volume still attached to prior instance $ATTACHED_TO; force-detaching..."
-                    aws ec2 detach-volume --volume-id "$DATA_VOLUME_ID" --force --region "$REGION" || true
+                  elif [ "$ATTACHED_TO" != "None" ] && [ -n "$ATTACHED_TO" ] && [ "$ATTACH_STATE" = "attached" ]; then
+                    echo "==> Volume still attached to prior instance $ATTACHED_TO; stopping it..."
+                    aws ec2 stop-instances --instance-ids "$ATTACHED_TO" --region "$REGION"
+                    aws ec2 wait instance-stopped --instance-ids "$ATTACHED_TO" --region "$REGION"
+                    echo "==> Prior instance stopped; detaching volume..."
+                    if ! aws ec2 detach-volume --volume-id "$DATA_VOLUME_ID" \
+                         --instance-id "$ATTACHED_TO" --region "$REGION"; then
+                      echo "==> Normal detach failed; force-detaching from the stopped instance..."
+                      aws ec2 detach-volume --volume-id "$DATA_VOLUME_ID" \
+                        --instance-id "$ATTACHED_TO" --force --region "$REGION"
+                    fi
                   fi
                   echo "  waiting for attach... attempt $i/30 (state=$VOL_STATE attached_to=$ATTACHED_TO)"
                   sleep 10

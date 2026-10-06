@@ -2,11 +2,12 @@
 # Exercise frontend-alb.yaml against the springbok dev environment before
 # handing it to NIH. Runs alongside dev's CloudFront — it adds a :443 listener to
 # dev's ALB and temporarily adds one statement to dev's frontend bucket policy
-# (removed by `down`; the rest of the live policy is left as it is then). Public DNS is never touched: checks use curl --resolve.
+# (removed by `down`; the rest of the live policy is left as it is then).
+# Public DNS is never touched: checks use curl --resolve.
 #
 #   AWS_PROFILE=springbok ./manual/frontend-alb/test-in-dev.sh up      # deploy stack + bucket policy statement
 #   AWS_PROFILE=springbok ./manual/frontend-alb/test-in-dev.sh check   # smoke-test through the ALB (exits 1 on any mismatch)
-#   AWS_PROFILE=springbok ./manual/frontend-alb/test-in-dev.sh down    # remove bucket policy statement + delete stack
+#   AWS_PROFILE=springbok ./manual/frontend-alb/test-in-dev.sh down    # delete stack + remove bucket policy statement
 set -euo pipefail
 
 REGION=us-east-1
@@ -20,16 +21,30 @@ SID=AllowFrontendAlbViaVpce   # Sid of the template's BucketPolicyStatement outp
 export AWS_REGION=$REGION
 
 exp() {
-  aws cloudformation list-exports --query "Exports[?Name=='$1'].Value" --output text
+  local v
+  v=$(aws cloudformation list-exports --query "Exports[?Name=='$1'].Value" --output text) || return 1
+  if [ -z "$v" ] || [ "$v" = "None" ]; then
+    echo "error: CloudFormation export '$1' not found" >&2
+    return 1
+  fi
+  printf '%s\n' "$v"
 }
 
 BUCKET=$(exp "${PROJECT}-${ENV}-frontend-bucket")
 
-# The bucket's live policy, minus the test statement (empty policy if none).
+# The bucket's live policy, minus the test statement. Falls back to an empty
+# policy only when the bucket has none; any other read error aborts, so a
+# later write can never replace the real statements.
 current_policy_without_test() {
-  { aws s3api get-bucket-policy --bucket "$BUCKET" --query Policy --output text 2>/dev/null \
-      || echo '{"Version":"2012-10-17","Statement":[]}'; } \
-    | jq --arg sid "$SID" '.Statement = [.Statement[] | select(.Sid != $sid)]'
+  local policy
+  if ! policy=$(aws s3api get-bucket-policy --bucket "$BUCKET" --query Policy --output text 2>&1); then
+    if [[ "$policy" != *NoSuchBucketPolicy* ]]; then
+      echo "error: cannot read the bucket policy on ${BUCKET}: ${policy}" >&2
+      return 1
+    fi
+    policy='{"Version":"2012-10-17","Statement":[]}'
+  fi
+  jq --arg sid "$SID" '.Statement = [.Statement[] | select(.Sid != $sid)]' <<<"$policy"
 }
 
 up() {
@@ -51,12 +66,13 @@ up() {
       FrontendBucketName="$BUCKET" \
       CertificateArn="$(exp ${PROJECT}-${ENV}-acm-cert-arn)"
 
-  local stmt
+  local stmt policy
   stmt=$(aws cloudformation describe-stacks --stack-name "$STACK" \
     --query "Stacks[0].Outputs[?OutputKey=='BucketPolicyStatement'].OutputValue" --output text)
 
+  policy=$(current_policy_without_test)   # aborts here (set -e) if the read fails
   aws s3api put-bucket-policy --bucket "$BUCKET" \
-    --policy "$(current_policy_without_test | jq -c --argjson s "$stmt" '.Statement += [$s]')"
+    --policy "$(jq -c --argjson s "$stmt" '.Statement += [$s]' <<<"$policy")"
   echo "Deployed ${STACK}; bucket policy statement added to ${BUCKET}."
 }
 
@@ -95,6 +111,9 @@ check() {
 
 down() {
   local policy
+  aws cloudformation delete-stack --stack-name "$STACK"
+  aws cloudformation wait stack-delete-complete --stack-name "$STACK"
+  echo "Deleted ${STACK}."
   policy=$(current_policy_without_test)
   if [ "$(jq '.Statement | length' <<<"$policy")" -eq 0 ]; then
     aws s3api delete-bucket-policy --bucket "$BUCKET"
@@ -102,9 +121,6 @@ down() {
     aws s3api put-bucket-policy --bucket "$BUCKET" --policy "$(jq -c . <<<"$policy")"
   fi
   echo "Removed ${SID} from the bucket policy on ${BUCKET}."
-  aws cloudformation delete-stack --stack-name "$STACK"
-  aws cloudformation wait stack-delete-complete --stack-name "$STACK"
-  echo "Deleted ${STACK}."
 }
 
 case "${1:-}" in
