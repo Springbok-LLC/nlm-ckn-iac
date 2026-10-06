@@ -141,6 +141,16 @@ Parameters:
       Optional ARN of the ALB's existing port-80 listener. When set, a rule is
       added that 301-redirects all HTTP requests to HTTPS on ListenerPort.
 
+  HttpRedirectRulePriority:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 50000
+    Description: >-
+      Priority of the HTTP->HTTPS redirect rule on HttpListenerArn (a different
+      listener from the HTTPS rules); change only if it collides with an
+      existing rule there.
+
   # --- Optional: S3 endpoint reuse -----------------------------------------
 
   ExistingS3EndpointId:
@@ -203,6 +213,7 @@ Metadata:
           - SpaRulePriority
           - StaticRulePriority
           - HttpListenerArn
+          - HttpRedirectRulePriority
       - Label:
           default: S3 endpoint
         Parameters: [ExistingS3EndpointId]
@@ -485,6 +496,9 @@ Resources:
       ServiceToken: !GetAtt TargetRegistrationFunction.Arn
       TargetGroupArn: !Ref S3TargetGroup
       EndpointId: !If [CreateEndpoint, !Ref S3InterfaceEndpoint, !Ref ExistingS3EndpointId]
+      # Not read by the function; a subnet change adds/removes endpoint ENIs
+      # without changing EndpointId, so this forces an Update to re-sync targets.
+      EndpointSubnetIds: !Ref EndpointSubnetIds
       Port: 443
 
   # ============================================================================
@@ -585,7 +599,7 @@ Resources:
     Condition: RedirectHttp
     Properties:
       ListenerArn: !Ref HttpListenerArn
-      Priority: !Ref ApiRulePriority
+      Priority: !Ref HttpRedirectRulePriority
       Conditions:
         - Field: path-pattern
           PathPatternConfig:

@@ -25,9 +25,16 @@ Parameters:
   #   Type: AWS::EC2::Image::Id
   #   Description: AMI ID to use for ECS container instances (must support ECS agent)
 
+  # x86_64 only: the launch template's ECS-optimized AMI is x86_64, so
+  # Graviton (t4g/m7g/...) types would fail to boot it.
   pInstanceType:
     Type: String
     Default: t3.medium
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
 
   pDesiredCapacity:
     Type: Number
