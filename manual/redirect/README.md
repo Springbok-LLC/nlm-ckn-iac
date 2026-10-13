@@ -42,13 +42,13 @@ CloudFormation stack creation until validation resolves.)
 This stack **must** be deployed in `us-east-1` (CloudFront functions + certs).
 
 Fill in `CertificateArn` in `parameters.json` (the hosted zone IDs are already
-set), then:
+set), then from this directory (`manual/redirect/`):
 
 ```bash
 aws cloudformation deploy \
   --region us-east-1 \
   --stack-name redirect-to-stage \
-  --template-file redirect.yaml \
+  --template-file cloudformation/redirect.yaml \
   --parameter-overrides file://parameters.json
 ```
 
