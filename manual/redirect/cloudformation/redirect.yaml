@@ -28,6 +28,12 @@ Parameters:
     Default: stage.nlm-ckn.org
     Description: Host that both source domains redirect to
 
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+    Description: Retention (days) for the Route 53 query log and CloudFront access log groups
+
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -44,6 +50,10 @@ Metadata:
           default: Redirect
         Parameters:
           - RedirectTarget
+      - Label:
+          default: Logging
+        Parameters:
+          - LogRetentionDays
 
 Resources:
   # ============================================================================
@@ -189,6 +199,157 @@ Resources:
         HostedZoneId: Z2FDTNDATAQYW2
         EvaluateTargetHealth: false
 
+  # ============================================================================
+  # Route 53 DNS query logging
+  # Query logging configs and their log groups MUST be in us-east-1.
+  # ============================================================================
+  CellKnQueryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/route53/cell-kn.org
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Name
+          Value: redirect-to-stage-dns-cell-kn
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: nlm-ckn
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  NlmCknQueryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/route53/nlm-ckn.org
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Name
+          Value: redirect-to-stage-dns-nlm-ckn
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: nlm-ckn
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  # One account-level policy covering every /aws/route53/* group (CloudWatch Logs
+  # allows only 10 resource policies per region, 5120 chars each).
+  Route53QueryLogResourcePolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: route53-query-logging
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "Route53QueryLogging",
+              "Effect": "Allow",
+              "Principal": { "Service": "route53.amazonaws.com" },
+              "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+              "Resource": "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/route53/*",
+              "Condition": {
+                "StringEquals": { "aws:SourceAccount": "${AWS::AccountId}" },
+                "ArnLike": { "aws:SourceArn": "arn:aws:route53:::hostedzone/*" }
+              }
+            }
+          ]
+        }
+
+  CellKnQueryLoggingConfig:
+    Type: AWS::Route53::QueryLoggingConfig
+    DependsOn: Route53QueryLogResourcePolicy
+    Properties:
+      HostedZoneId: !Ref CellKnHostedZoneId
+      CloudWatchLogsLogGroupArn: !Sub 'arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:${CellKnQueryLogGroup}'
+
+  NlmCknQueryLoggingConfig:
+    Type: AWS::Route53::QueryLoggingConfig
+    DependsOn: Route53QueryLogResourcePolicy
+    Properties:
+      HostedZoneId: !Ref NlmCknHostedZoneId
+      CloudWatchLogsLogGroupArn: !Sub 'arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:${NlmCknQueryLogGroup}'
+
+  # ============================================================================
+  # CloudFront standard logging (v2) -> CloudWatch Logs
+  # ============================================================================
+  # /aws/vendedlogs/ prefix keeps the log-delivery resource policy that CloudWatch
+  # Logs manages for vended logs from growing per log group.
+  AccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/vendedlogs/cloudfront/redirect-to-stage
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Name
+          Value: redirect-to-stage-access-logs
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: nlm-ckn
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  AccessLogDeliverySource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: redirect-to-stage-cloudfront
+      LogType: ACCESS_LOGS
+      ResourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${RedirectDistribution}'
+      Tags:
+        - Key: Name
+          Value: redirect-to-stage-cloudfront
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: nlm-ckn
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  AccessLogDeliveryDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: redirect-to-stage-cloudwatch
+      DestinationResourceArn: !Sub 'arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:${AccessLogGroup}'
+      OutputFormat: json
+      Tags:
+        - Key: Name
+          Value: redirect-to-stage-cloudwatch
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: nlm-ckn
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  AccessLogDelivery:
+    Type: AWS::Logs::Delivery
+    Properties:
+      DeliverySourceName: !Ref AccessLogDeliverySource
+      DeliveryDestinationArn: !GetAtt AccessLogDeliveryDestination.Arn
+      Tags:
+        - Key: Name
+          Value: redirect-to-stage-access-logs
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: nlm-ckn
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
 Outputs:
   DistributionId:
     Description: CloudFront distribution ID
@@ -197,3 +358,15 @@ Outputs:
   DistributionDomainName:
     Description: CloudFront distribution domain name
     Value: !GetAtt RedirectDistribution.DomainName
+
+  CellKnQueryLogGroupName:
+    Description: CloudWatch Logs group receiving Route 53 query logs for cell-kn.org
+    Value: !Ref CellKnQueryLogGroup
+
+  NlmCknQueryLogGroupName:
+    Description: CloudWatch Logs group receiving Route 53 query logs for nlm-ckn.org
+    Value: !Ref NlmCknQueryLogGroup
+
+  AccessLogGroupName:
+    Description: CloudWatch Logs group receiving CloudFront access logs
+    Value: !Ref AccessLogGroup
