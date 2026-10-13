@@ -11,6 +11,13 @@ query string.
 | `AWS::CloudFront::Function` (`redirect-to-stage`) | viewer-request function that returns a `301 Moved Permanently` to `https://stage.nlm-ckn.org<uri><?query>` |
 | `AWS::CloudFront::Distribution` (comment `Redirect to stage`) | distribution with aliases `cell-kn.org` and `nlm-ckn.org`, function attached to the default behavior |
 | `AWS::Route53::RecordSet` ×4 | A + AAAA alias records for both apex domains pointing at the distribution |
+| `AWS::Logs::LogGroup` ×2 (`/aws/route53/cell-kn.org`, `/aws/route53/nlm-ckn.org`) | Route 53 DNS query logs, one group per hosted zone |
+| `AWS::Logs::ResourcePolicy` (`route53-query-logging`) | lets `route53.amazonaws.com` write to `/aws/route53/*` groups |
+| `AWS::Route53::QueryLoggingConfig` ×2 | enables query logging on both hosted zones |
+| `AWS::Logs::LogGroup` (`/aws/vendedlogs/cloudfront/redirect-to-stage`) | CloudFront access logs |
+| `AWS::Logs::DeliverySource` / `DeliveryDestination` / `Delivery` | CloudFront standard logging (v2) from the distribution to that log group (JSON) |
+
+All log groups use the `LogRetentionDays` parameter (default 90).
 
 ## Prerequisite — ACM certificate (not created here)
 
@@ -45,6 +52,19 @@ aws cloudformation deploy \
   --parameter-overrides file://parameters.json
 ```
 
+To update the existing stack in place (e.g. after template changes), preview
+with a change set first:
+
+```bash
+aws cloudformation deploy \
+  --profile springbok \
+  --region us-east-1 \
+  --stack-name redirect-to-stage \
+  --template-file cloudformation/redirect.yaml \
+  --parameter-overrides file://parameters.json \
+  --no-execute-changeset
+```
+
 Hosted zones (already wired into `parameters.json`):
 
 | Domain | Hosted Zone ID |
@@ -71,3 +91,18 @@ Notes:
   on every viewer request) — browsers requesting `http://cell-kn.org` get the
   301 straight to the https stage URL.
 - Path and query string are preserved in the redirect Location.
+
+## Logs
+
+Used to correlate reported outages with what actually reached AWS:
+
+- **DNS queries** (Route 53 resolvers asking for the apex names):
+  `/aws/route53/cell-kn.org`, `/aws/route53/nlm-ckn.org` — one log stream per
+  Route 53 edge location; each line has timestamp, query name/type, response
+  code, edge location, and the resolver IP (plus EDNS client subnet if sent).
+- **HTTP requests** reaching CloudFront: `/aws/vendedlogs/cloudfront/redirect-to-stage`
+  (JSON, includes client IP, host, status, edge location). Delivery lags a few
+  minutes.
+
+If a user reports a failure, ask for the time and their public IP / resolver,
+then search both groups with CloudWatch Logs Insights.
