@@ -1,0 +1,15 @@
+[
+  { "ParameterKey": "ProjectName",                 "ParameterValue": "nlm-ckn" },
+  { "ParameterKey": "Environment",                 "ParameterValue": "prod" },
+  { "ParameterKey": "VpcId",                       "ParameterValue": "vpc-REPLACE" },
+  { "ParameterKey": "EndpointSubnetIds",           "ParameterValue": "subnet-REPLACE_A,subnet-REPLACE_B" },
+  { "ParameterKey": "LoadBalancerArn",             "ParameterValue": "arn:aws:elasticloadbalancing:us-east-1:ACCOUNT:loadbalancer/app/REPLACE/REPLACE" },
+  { "ParameterKey": "LoadBalancerSecurityGroupId", "ParameterValue": "sg-REPLACE" },
+  { "ParameterKey": "BackendTargetGroupArn",       "ParameterValue": "arn:aws:elasticloadbalancing:us-east-1:ACCOUNT:targetgroup/REPLACE/REPLACE" },
+  { "ParameterKey": "FrontendBucketName",          "ParameterValue": "REPLACE-frontend" },
+  { "ParameterKey": "CertificateArn",              "ParameterValue": "arn:aws:acm:us-east-1:ACCOUNT:certificate/REPLACE" },
+  { "ParameterKey": "HttpListenerArn",             "ParameterValue": "" },
+  { "ParameterKey": "ExistingHttpsListenerArn",    "ParameterValue": "" },
+  { "ParameterKey": "ExistingS3EndpointId",        "ParameterValue": "" },
+  { "ParameterKey": "CreateWebAcl",                "ParameterValue": "false" }
+]
