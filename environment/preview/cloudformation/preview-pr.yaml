@@ -1,0 +1,352 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  PR preview — one stack per nlm-ckn-ui pull request (nlm-ckn-preview-pr-<n>):
+  a single Fargate Spot backend task in the shared environment's cluster, its
+  target group, and a listener rule on the environment's :8000 ALB listener
+  that forwards pr-<n>.<env>.<domain> (plus the CloudFront origin header) to
+  it. The frontend build lives in the preview bucket under pr-<n>/ and is
+  served by the wildcard distribution in preview-platform.yaml.
+
+# ── Deployment ────────────────────────────────────────────────────────────────
+#
+# Not deployed from this repo. deploy/03-deploy-preview-platform.sh publishes
+# this file to s3://<templates bucket>/preview/preview-pr-<iac sha>.yaml and
+# writes its https URL to SSM /<project>/<env>/preview/pr-template-url.
+# nlm-ckn-ui's preview.yml (in the protected `preview` GitHub environment)
+# runs, as the preview CI role:
+#
+#   URL=$(aws ssm get-parameter --name /nlm-ckn/dev/preview/pr-template-url \
+#     --query Parameter.Value --output text)
+#   aws cloudformation create-change-set \
+#     --stack-name nlm-ckn-preview-pr-<n> \
+#     --change-set-name pr-<n>-<run id> \
+#     --change-set-type CREATE|UPDATE \
+#     --template-url "$URL" \
+#     --role-arn <PreviewServiceRoleArn from preview-platform.yaml> \
+#     --parameters ParameterKey=PrNumber,ParameterValue=<n> \
+#                  ParameterKey=ImageTag,ParameterValue=<existing tag> \
+#                  ParameterKey=ExpiresAt,ParameterValue=<ISO-8601 UTC> \
+#     --tags Key=ExpiresAt,Value=<same> Key=Project,Value=nlm-ckn ...
+#   aws cloudformation wait change-set-create-complete ...
+#   aws cloudformation execute-change-set ...
+#
+# `aws cloudformation deploy` cannot be used: it sends the template inline,
+# and the CI role may only create change sets whose TemplateURL is under the
+# templates bucket's preview/ prefix.
+#
+# ProjectName/Environment have defaults so the workflow need not pass them.
+# The stack's resources are created by the service role, which is scoped to
+# exactly the names used below — renaming anything here needs a matching
+# change to PreviewServiceRole in preview-platform.yaml.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: nlm-ckn
+    Description: Project name for resource naming
+
+  Environment:
+    Type: String
+    Default: dev
+    Description: Environment whose ALB, cluster, secrets and ArangoDB this preview shares
+    AllowedValues:
+      - dev
+      - stage
+
+  PrNumber:
+    Type: Number
+    MinValue: 1
+    MaxValue: 9999
+    Description: >-
+      nlm-ckn-ui pull request number. Served at pr-<PrNumber>.<env>.<domain>.
+      Capped at 9999 so the derived listener-rule priority stays below dev's
+      priority-50000 catch-all (see PreviewListenerRule).
+
+  ImageTag:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+    Description: >-
+      Tag of a backend image ALREADY in the shared ECR repo (built and pushed
+      by nlm-ckn-ui's normal image build). The preview CI role cannot push
+      images.
+
+  ExpiresAt:
+    Type: String
+    AllowedPattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
+    Description: >-
+      UTC expiry (e.g. 2026-10-25T14:00:00Z). The preview-platform sweeper
+      deletes the stack after this time; it reads the ExpiresAt stack tag and
+      falls back to this parameter. Updates must pass the original value back.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Configuration
+        Parameters:
+          - ProjectName
+          - Environment
+      - Label:
+          default: Pull request
+        Parameters:
+          - PrNumber
+          - ImageTag
+          - ExpiresAt
+
+Conditions:
+  # Mirrors backend.yaml: dev tasks get a public IP.
+  IsDev: !Equals [!Ref Environment, 'dev']
+
+Resources:
+  # ============================================================================
+  # CloudWatch Log Group
+  # ============================================================================
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}-${Environment}-preview-pr-${PrNumber}'
+      RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-pr-${PrNumber}-logs'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+        - Key: PrNumber
+          Value: !Ref PrNumber
+
+  # ============================================================================
+  # ECS Task Definition — modelled on backend.yaml: same env, secrets and
+  # roles, but 0.25 vCPU / 0.5 GB and the PR's image tag. ALLOWED_HOSTS and
+  # CORS_ALLOWED_ORIGINS come from the environment's SSM parameters; in
+  # dev/stage ALLOWED_HOSTS is 'localhost,*', so pr-<n> hosts already pass, and
+  # the SPA calls /arango_api/ same-origin, so CORS is not involved.
+  # ============================================================================
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-${Environment}-preview-pr-${PrNumber}'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '256'
+      Memory: '512'
+      # The environment's self-managed backend roles (backend.yaml, dev/stage).
+      ExecutionRoleArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-backend-exec'
+      TaskRoleArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-backend-task'
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Sub '{{resolve:ssm:/${ProjectName}/shared/ecr-url}}:${ImageTag}'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            - Name: ARANGO_DB_HOST
+              Value: !Sub
+                - 'http://${ArangoHost}:8529'
+                - ArangoHost: !ImportValue
+                    Fn::Sub: '${ProjectName}-${Environment}-arangodb-dns'
+            - Name: ARANGO_DB_NAME_ONTOLOGIES
+              Value: Cell-KN-Ontologies
+            - Name: ARANGO_DB_NAME_PHENOTYPES
+              Value: Cell-KN-Phenotypes
+            - Name: GRAPH_NAME_ONTOLOGIES
+              Value: KN-Ontologies-v2.0
+            - Name: GRAPH_NAME_PHENOTYPES
+              Value: KN-Phenotypes-v2.0
+          Secrets:
+            - Name: SECRET_KEY
+              ValueFrom: !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-django-secret-key-arn'
+            - Name: ALLOWED_HOSTS
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/${Environment}/django/allowed-hosts'
+            - Name: CORS_ALLOWED_ORIGINS
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/${Environment}/django/cors-origins'
+            # The environment's read-only ArangoDB user (nlm_ro).
+            - Name: ARANGO_DB_USER
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/${Environment}/arango/db-user'
+            - Name: ARANGO_DB_PASSWORD
+              ValueFrom: !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-arango-password-secret-arn'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-pr-${PrNumber}-task'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+        - Key: PrNumber
+          Value: !Ref PrNumber
+
+  # ============================================================================
+  # Target group + listener rule on the environment's :8000 listener
+  # ============================================================================
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-pr-${PrNumber}'
+      Port: 8000
+      Protocol: HTTP
+      VpcId: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-vpc-id'
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health/
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200-399
+      TargetGroupAttributes:
+        # Short drain: previews are torn down, not rolled.
+        - Key: deregistration_delay.timeout_seconds
+          Value: '15'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-pr-${PrNumber}-tg'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+        - Key: PrNumber
+          Value: !Ref PrNumber
+
+  # Matches ONLY this PR's host AND the CloudFront origin secret, so it can
+  # never catch dev.<domain> traffic and does not open a path around
+  # CloudFront (see alb.yaml: the :8000 catch-all sits at priority 50000).
+  #
+  # Priority: CloudFormation has no arithmetic, so "100 + PrNumber" cannot be
+  # computed here. The priority is instead the digit string "1" followed by
+  # PrNumber (PR 7 → 17, PR 42 → 142, PR 1234 → 11234). That is unique per PR,
+  # always >= 11 (leaving 1-10 free for hand-made rules) and, with
+  # PrNumber <= 9999, always <= 19999 — well before the catch-all.
+  PreviewListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-backend-listener-arn'
+      Priority: !Sub '1${PrNumber}'
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Sub
+                - 'pr-${PrNumber}.${Environment}.${Domain}'
+                - Domain: !ImportValue
+                    Fn::Sub: '${ProjectName}-${Environment}-domain-name'
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Custom-Origin-Header
+            Values:
+              - !Sub '{{resolve:secretsmanager:/${ProjectName}/${Environment}/secrets/cloudfront-secret:SecretString}}'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ============================================================================
+  # ECS Service — one Fargate Spot task, no auto-scaling
+  # ============================================================================
+  EcsService:
+    Type: AWS::ECS::Service
+    # The target group must be attached to a listener before ECS registers
+    # tasks in it.
+    DependsOn: PreviewListenerRule
+    Properties:
+      ServiceName: !Sub '${ProjectName}-${Environment}-preview-pr-${PrNumber}'
+      Cluster: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-cluster-name'
+      TaskDefinition: !Ref TaskDefinition
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      # Propagate the service's tags onto the tasks and their ENIs; ADR 0004.
+      PropagateTags: SERVICE
+      EnableECSManagedTags: true
+      DesiredCount: 1
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentConfiguration:
+        # One task: let a push replace it rather than run two side by side.
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          # Same as backend.yaml: dev's default-VPC subnets have no NAT, so the
+          # task needs a public IP to reach ECR/Secrets Manager.
+          AssignPublicIp: !If [IsDev, ENABLED, DISABLED]
+          Subnets: !Split
+            - ','
+            - !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-private-subnet-ids'
+          SecurityGroups:
+            - !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-backend-sg-id'
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroup
+          ContainerName: backend
+          ContainerPort: 8000
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-pr-${PrNumber}-service'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+        - Key: PrNumber
+          Value: !Ref PrNumber
+
+Outputs:
+  PreviewUrl:
+    Description: Preview URL
+    Value: !Sub
+      - 'https://pr-${PrNumber}.${Environment}.${Domain}'
+      - Domain: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-domain-name'
+
+  ServiceName:
+    Description: ECS service name
+    Value: !GetAtt EcsService.Name
+
+  ListenerRulePriority:
+    Description: Priority of this PR's rule on the :8000 listener
+    Value: !Sub '1${PrNumber}'
+
+  ExpiresAt:
+    Description: When the sweeper deletes this stack
+    Value: !Ref ExpiresAt

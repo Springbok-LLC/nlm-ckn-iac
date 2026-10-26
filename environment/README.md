@@ -145,6 +145,26 @@ own templates (below) and `prod` is managed by NIH outside this repo.
 | ArangoDB | `arangodb/cloudformation/arangodb.yaml` | EC2 instance + EBS volume, Cloud Map service registration, S3 restore on boot. |
 | Monitoring | `monitoring/cloudformation/monitoring.yaml` | CloudWatch alarms, wedge-detection Lambdas, SNS notifications, KMS key. Optional. |
 
+### PR previews (`preview/`)
+
+Short-lived previews of labelled **nlm-ckn-ui** pull requests at
+`https://pr-<n>.dev.nlm-ckn.org` (basic auth), sharing dev's ALB, cluster,
+secrets and ArangoDB (read-only `nlm_ro`).
+
+| Template | Deployed by | Provisions |
+|----------|-------------|------------|
+| `preview/cloudformation/preview-platform.yaml` | `deploy/03-deploy-preview-platform.sh <env>`, once | `*.dev` ACM cert (also an SNI cert on dev's :8000 listener), preview S3 bucket, one wildcard CloudFront distribution reusing dev's WAF, a **CloudFront Function + KeyValueStore** for basic auth and `pr-<n>` → `pr-<n>/` prefix routing, wildcard Route 53 records, the CloudFormation service role and GitHub OIDC CI role for preview stacks, and an hourly sweeper Lambda that deletes stacks past their `ExpiresAt` tag. |
+| `preview/cloudformation/preview-pr.yaml` | nlm-ckn-ui's `preview.yml`, one stack `nlm-ckn-preview-pr-<n>` per PR | One Fargate Spot backend task (0.25 vCPU / 0.5 GB), target group, and a listener rule on dev's :8000 listener matching `pr-<n>` host + origin header. |
+
+nlm-ckn-ui never checks out this repo: the deploy script publishes
+`preview-pr.yaml` to the templates bucket and records its URL in SSM
+`/nlm-ckn/<env>/preview/pr-template-url`, which the workflow passes to
+`create-change-set --template-url`. The preview CI role can only use templates
+from that `preview/` prefix, deploys images already in ECR (no push), and is
+trusted only from nlm-ckn-ui's protected `preview` GitHub environment. Previews
+need dev's :8000 catch-all rule at priority 50000 (`alb.yaml`) and the
+`FARGATE_SPOT` capacity provider on the cluster (`ecs-cluster.yaml`).
+
 ### Sandbox (`sandbox/`)
 
 The NIH `sandbox` account has constraints that the shared `platform/` +

@@ -20,6 +20,17 @@ waves with a lower number having finished.
 | 2 | `02-deploy-fetch.sh` | wave 1 (ArangoDB dataset bucket, via SSM) |
 | 3 | `03-deploy-batch.sh` | wave 2's `02-deploy-fetch.sh` (NCBI secret ARN output) |
 | 3 | `03-deploy-monitoring.sh <env>` | wave 2's `02-deploy-environment.sh` (arangodb/ALB outputs) |
+| 3 | `03-deploy-preview-platform.sh <env>` | wave 2's `02-deploy-environment.sh` incl. the CDN stack (ALB listener, cluster, web ACL exports) |
+
+`03-deploy-preview-platform.sh` also publishes `preview-pr.yaml` (versioned by
+git SHA) to the templates bucket and points SSM
+`/nlm-ckn/<env>/preview/pr-template-url` at its https URL; nlm-ckn-ui's preview
+workflow creates per-PR change sets from that URL (its CI role may use no other
+template, may not push images, and is trusted only from the protected `preview`
+GitHub environment). After the first run, seed the basic-auth
+credential in the preview KeyValueStore (`aws cloudfront-keyvaluestore put-key
+--key basic-auth`, value = base64 of `user:password`) — the exact commands are
+in the script's header. Nothing secret is committed.
 
 `etl/cloudformation/github-oidc.yaml` has no wrapper script here — it's deployed
 manually, once per account, per the command in its own header — so it isn't
