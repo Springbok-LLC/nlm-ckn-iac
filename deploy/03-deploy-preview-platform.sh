@@ -19,8 +19,8 @@
 # nlm-ckn-ui side (not in this repo): preview.yml's job must run in a
 # protected GitHub environment named `preview` (required reviewers) — the CI
 # role trusts only repo:Springbok-LLC/nlm-ckn-ui:environment:preview — and it
-# deploys an ImageTag that already exists in the shared ECR repo (the CI role
-# has no push access).
+# builds the PR's backend image and pushes it to the preview ECR repo
+# (<project>-<env>-preview-backend; the CI role can push nowhere else).
 #
 # The per-PR template is keyed by the commit SHA, so the working tree must be
 # clean. There is deliberately no override: every object under preview/ is
@@ -171,7 +171,8 @@ aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REG
   --query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' --output table
 echo ""
 echo "Set these as nlm-ckn-ui repository variables for preview.yml:"
-echo "  PreviewCiRoleArn, PreviewServiceRoleArn, PreviewBucketName, PreviewDistributionId (above)"
+echo "  PreviewCiRoleArn, PreviewServiceRoleArn, PreviewBucketName, PreviewDistributionId,"
+echo "  PreviewEcrRepositoryUri (above)"
 echo ""
 echo "If not yet done, seed the basic-auth credential in the KeyValueStore"
 echo "(see the header of this script: aws cloudfront-keyvaluestore put-key ... --key basic-auth)."

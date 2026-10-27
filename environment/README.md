@@ -160,7 +160,8 @@ nlm-ckn-ui never checks out this repo: the deploy script publishes
 `preview-pr.yaml` to the templates bucket and records its URL in SSM
 `/nlm-ckn/<env>/preview/pr-template-url`, which the workflow passes to
 `create-change-set --template-url`. The preview CI role can only use templates
-from that `preview/` prefix, deploys images already in ECR (no push), and is
+from that `preview/` prefix, may push only to the preview ECR repo
+(`<project>-<env>-preview-backend`, tags immutable, images expire after 7 days), and is
 trusted only from nlm-ckn-ui's protected `preview` GitHub environment. Previews
 need dev's :8000 catch-all rule at priority 50000 (`alb.yaml`) and the
 `FARGATE_SPOT` capacity provider on the cluster (`ecs-cluster.yaml`).

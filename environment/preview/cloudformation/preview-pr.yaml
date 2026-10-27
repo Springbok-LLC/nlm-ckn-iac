@@ -24,7 +24,7 @@ Description: >-
 #     --template-url "$URL" \
 #     --role-arn <PreviewServiceRoleArn from preview-platform.yaml> \
 #     --parameters ParameterKey=PrNumber,ParameterValue=<n> \
-#                  ParameterKey=ImageTag,ParameterValue=<existing tag> \
+#                  ParameterKey=ImageTag,ParameterValue=pr-<n>-<sha7> \
 #                  ParameterKey=ExpiresAt,ParameterValue=<ISO-8601 UTC> \
 #     --tags Key=ExpiresAt,Value=<same> Key=Project,Value=nlm-ckn ...
 #   aws cloudformation wait change-set-create-complete ...
@@ -66,9 +66,9 @@ Parameters:
     Type: String
     AllowedPattern: '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
     Description: >-
-      Tag of a backend image ALREADY in the shared ECR repo (built and pushed
-      by nlm-ckn-ui's normal image build). The preview CI role cannot push
-      images.
+      Tag of this PR's backend image in the preview ECR repo
+      (<project>-<env>-preview-backend, from preview-platform.yaml), pushed by
+      preview.yml before deploying, e.g. pr-<n>-<sha7>. Tags are immutable.
 
   ExpiresAt:
     Type: String
@@ -143,7 +143,10 @@ Resources:
       TaskRoleArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-backend-task'
       ContainerDefinitions:
         - Name: backend
-          Image: !Sub '{{resolve:ssm:/${ProjectName}/shared/ecr-url}}:${ImageTag}'
+          Image: !Sub
+            - '${Repo}:${ImageTag}'
+            - Repo: !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-preview-ecr-uri'
           Essential: true
           PortMappings:
             - ContainerPort: 8000

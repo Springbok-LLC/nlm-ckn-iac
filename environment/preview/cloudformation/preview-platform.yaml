@@ -26,7 +26,6 @@ Description: >-
 #   ${ProjectName}-${Environment}-cloudfront-waf-arn    (frontend-cdn.yaml)
 #   ${ProjectName}-templates-bucket                     (account/bootstrap.yaml)
 #   ${ProjectName}-github-oidc-arn                      (account/bootstrap.yaml)
-#   ${ProjectName}-shared-ecr-name                      (shared/shared-resources.yaml)
 #
 # The basic-auth credential is NOT in this template. Seed it in the
 # KeyValueStore under the key `basic-auth` (value = base64 of "user:password")
@@ -152,6 +151,54 @@ Resources:
           Value: !Ref Environment
         - Key: Name
           Value: !Sub '${ProjectName}-${Environment}-preview-bucket'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  # ============================================================================
+  # Preview ECR repo — PR backend images (pr-<n>-<sha>), pushed by the CI role.
+  # Kept apart from the shared nlm-ckn-backend repo so preview CI can never
+  # overwrite a tag dev/stage run. Tags are immutable and every image expires
+  # 7 days after push (previews live at most 3). The tasks pull with dev's
+  # backend execution role (AmazonECSTaskExecutionRolePolicy covers any repo).
+  # ============================================================================
+  PreviewEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-${Environment}-preview-backend'
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire preview images 7 days after push",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-backend'
         - Key: ManagedBy
           Value: CloudFormation
         - Key: Owner
@@ -436,8 +483,8 @@ Resources:
   #   - listener rules on <env>'s :8000 listener only
   #   - passing <env>'s backend task/execution roles to ECS
   #   - log groups /ecs/<project>-<env>-preview-pr-*
-  #   - resolving the ECR URL (SSM) and the origin secret (Secrets Manager)
-  #     dynamic references in preview-pr.yaml
+  #   - resolving the origin secret (Secrets Manager) dynamic reference in
+  #     preview-pr.yaml
   # ============================================================================
   PreviewServiceRole:
     Type: AWS::IAM::Role
@@ -557,12 +604,6 @@ Resources:
                   - logs:ListTagsLogGroup
                 Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ProjectName}-${Environment}-preview-pr-*'
               # Dynamic references in preview-pr.yaml are resolved with this role.
-              - Sid: ResolveEcrUrl
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:GetParameters
-                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/shared/ecr-url'
               - Sid: ResolveOriginSecret
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
@@ -597,8 +638,8 @@ Resources:
   # TemplateUrl) is refused: the workflow uses create-change-set
   # --template-url <SSM value> + execute-change-set.
   #
-  # It has no ECR access: previews run images already in the shared repo
-  # (ImageTag parameter), so CI cannot overwrite tags other environments use.
+  # Its only ECR access is push/pull on the preview repo (PreviewEcrRepository),
+  # so CI cannot overwrite tags in the shared repo that other environments use.
   # ============================================================================
   PreviewCiRole:
     Type: AWS::IAM::Role
@@ -679,15 +720,26 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: cloudformation.amazonaws.com
-              # Read-only: lets the workflow check the ImageTag it is about to
-              # deploy exists before creating the change set.
-              - Sid: EcrDescribeBackendImages
+              # docker login; the token itself grants nothing beyond the
+              # repository statement below.
+              - Sid: EcrAuth
                 Effect: Allow
-                Action: ecr:DescribeImages
-                Resource: !Sub
-                  - 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${Repo}'
-                  - Repo: !ImportValue
-                      Fn::Sub: '${ProjectName}-shared-ecr-name'
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              # Push PR images (and skip the build when the tag already
+              # exists) — preview repo only.
+              - Sid: PreviewEcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt PreviewEcrRepository.Arn
               - Sid: PreviewBucketList
                 Effect: Allow
                 Action: s3:ListBucket
@@ -961,6 +1013,18 @@ Outputs:
     Value: !GetAtt PreviewAuthStore.Arn
     Export:
       Name: !Sub '${ProjectName}-${Environment}-preview-auth-kvs-arn'
+
+  PreviewEcrRepositoryName:
+    Description: Preview backend ECR repo (CI pushes pr-<n>-<sha> tags)
+    Value: !Ref PreviewEcrRepository
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-preview-ecr-name'
+
+  PreviewEcrRepositoryUri:
+    Description: Preview backend ECR repo URI (preview-pr.yaml image prefix)
+    Value: !GetAtt PreviewEcrRepository.RepositoryUri
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-preview-ecr-uri'
 
   PreviewServiceRoleArn:
     Description: CloudFormation service role for preview stacks (--role-arn)
