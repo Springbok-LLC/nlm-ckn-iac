@@ -27,10 +27,11 @@ git SHA) to the templates bucket and points SSM
 `/nlm-ckn/<env>/preview/pr-template-url` at its https URL; nlm-ckn-ui's preview
 workflow creates per-PR change sets from that URL (its CI role may use no other
 template, may not push images, and is trusted only from the protected `preview`
-GitHub environment). After the first run, seed the basic-auth
-credential in the preview KeyValueStore (`aws cloudfront-keyvaluestore put-key
---key basic-auth`, value = base64 of `user:password`) — the exact commands are
-in the script's header. Nothing secret is committed.
+GitHub environment). It also seeds a random
+session-cookie signing key in the preview KeyValueStore (`session-key`) if none
+exists; nlm-ckn-ui's `scripts/ops/preview-login.sh <pr>` signs a link with it, and rotating
+it (command in the script's header) signs everyone out. Nothing secret is
+committed.
 
 `etl/cloudformation/github-oidc.yaml` has no wrapper script here — it's deployed
 manually, once per account, per the command in its own header — so it isn't

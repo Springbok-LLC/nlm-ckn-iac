@@ -27,7 +27,11 @@
 # usable by the preview CI role (its TemplateUrl condition), so only committed
 # templates are ever published there.
 #
-# AFTER the first deploy, seed the basic-auth credential (never committed):
+# After the stack deploy, the script seeds a random session-cookie signing key
+# in the preview KeyValueStore (key `session-key`) if none is there yet; it is
+# never committed. Users get a sign-in link from
+#   ./scripts/ops/preview-login.sh <pr>    (in nlm-ckn-ui)
+# To rotate the key (signs everyone out; no redeploy):
 #
 #   KVS_ARN=$(aws cloudformation describe-stacks --region us-east-1 \
 #     --stack-name nlm-ckn-<env>-preview-platform \
@@ -35,10 +39,7 @@
 #   ETAG=$(aws cloudfront-keyvaluestore describe-key-value-store \
 #     --kvs-arn "$KVS_ARN" --query ETag --output text)
 #   aws cloudfront-keyvaluestore put-key --kvs-arn "$KVS_ARN" --if-match "$ETAG" \
-#     --key basic-auth --value "$(printf '%s' '<user>:<password>' | base64)"
-#
-# Rotating it is the same put-key; no redeploy. Until it is seeded every
-# preview request gets 401.
+#     --key session-key --value "$(openssl rand -hex 32)"
 #
 # The environment's ECS cluster must have the FARGATE_SPOT capacity provider
 # (ecs-cluster.yaml, deployed by 02-deploy-environment.sh --infra-only).
@@ -150,6 +151,21 @@ aws cloudformation deploy \
     Owner=springbok \
     Repository=nlm-ckn-iac
 
+# ── Session-cookie signing key ───────────────────────────────────────────────
+KVS_ARN=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='PreviewAuthStoreArn'].OutputValue" --output text)
+if aws cloudfront-keyvaluestore get-key --region "$AWS_REGION" \
+    --kvs-arn "$KVS_ARN" --key session-key >/dev/null 2>&1; then
+  echo "==> session-key already seeded in ${KVS_ARN}"
+else
+  echo "==> Seeding a random session-key in ${KVS_ARN}"
+  ETAG=$(aws cloudfront-keyvaluestore describe-key-value-store --region "$AWS_REGION" \
+    --kvs-arn "$KVS_ARN" --query ETag --output text)
+  aws cloudfront-keyvaluestore put-key --region "$AWS_REGION" \
+    --kvs-arn "$KVS_ARN" --if-match "$ETAG" \
+    --key session-key --value "$(openssl rand -hex 32)" >/dev/null
+fi
+
 # ── Publish the per-PR template ──────────────────────────────────────────────
 echo "==> Uploading ${PR_TEMPLATE} → ${PR_TEMPLATE_URI}"
 aws s3 cp "$PR_TEMPLATE" "$PR_TEMPLATE_URI" --region "$AWS_REGION"
@@ -174,5 +190,4 @@ echo "Set these as nlm-ckn-ui repository variables for preview.yml:"
 echo "  PreviewCiRoleArn, PreviewServiceRoleArn, PreviewBucketName, PreviewDistributionId,"
 echo "  PreviewEcrRepositoryUri (above)"
 echo ""
-echo "If not yet done, seed the basic-auth credential in the KeyValueStore"
-echo "(see the header of this script: aws cloudfront-keyvaluestore put-key ... --key basic-auth)."
+echo "Open a preview (from nlm-ckn-ui): AWS_PROFILE=${AWS_PROFILE:-<profile>} ./scripts/ops/preview-login.sh <pr> --env ${ENVIRONMENT}"

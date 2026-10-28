@@ -3,8 +3,8 @@ Description: >-
   PR preview platform — the fixed, deployed-once half of the nlm-ckn-ui PR
   preview environments: a wildcard ACM cert (also attached to dev's :8000 ALB
   listener as an SNI cert), the preview S3 bucket, one wildcard CloudFront
-  distribution (*.<env>.<domain>) with a basic-auth / host-routing CloudFront
-  Function backed by a KeyValueStore, the wildcard Route 53 records, the
+  distribution (*.<env>.<domain>) with a signed-cookie auth / host-routing
+  CloudFront Function backed by a KeyValueStore, the wildcard Route 53 records, the
   CloudFormation service role that per-PR stacks run under, the GitHub OIDC CI
   role nlm-ckn-ui's preview workflow assumes, and an hourly sweeper that deletes
   expired preview stacks. The per-PR half is preview-pr.yaml.
@@ -27,10 +27,10 @@ Description: >-
 #   ${ProjectName}-templates-bucket                     (account/bootstrap.yaml)
 #   ${ProjectName}-github-oidc-arn                      (account/bootstrap.yaml)
 #
-# The basic-auth credential is NOT in this template. Seed it in the
-# KeyValueStore under the key `basic-auth` (value = base64 of "user:password")
-# after the first deploy — see deploy/03-deploy-preview-platform.sh. Until it
-# is seeded every preview request gets 401.
+# The session-cookie signing key is NOT in this template. The deploy script
+# seeds a random one in the KeyValueStore under the key `session-key` if it is
+# missing — see deploy/03-deploy-preview-platform.sh. Until it is seeded every
+# preview request gets 403.
 
 Parameters:
   ProjectName:
@@ -244,16 +244,24 @@ Resources:
                 aws:SecureTransport: 'false'
 
   # ============================================================================
-  # Basic auth + host routing (viewer-request, BOTH behaviours)
+  # Signed-cookie auth + host routing (viewer-request, BOTH behaviours)
   #
   # 1. Only pr-<digits>.<env>.<domain> hosts are served; anything else → 404.
-  # 2. Authorization must equal "Basic " + the KVS `basic-auth` value (base64 of
-  #    user:password); otherwise 401 + WWW-Authenticate. A missing key fails
-  #    closed (401).
-  # 3. Authorization is then deleted, so the backend (AllViewer) never sees it.
-  # 4. S3 behaviour only: rewrite the URI into the PR's prefix, with SPA
+  # 2. GET /_preview/login?token=<t> with a valid token sets the
+  #    preview_session cookie (HttpOnly, host-only, expires with the token) and
+  #    302s to /. nlm-ckn-ui's scripts/ops/preview-login.sh mints these links.
+  # 3. Every other request needs a valid preview_session cookie; otherwise 403
+  #    with a page saying how to get a link. A missing KVS key fails closed.
+  # 4. The cookie is then deleted, so the backend (AllViewer) never sees it.
+  # 5. S3 behaviour only: rewrite the URI into the PR's prefix, with SPA
   #    fallback to /pr-<n>/index.html for extension-less paths (same rule as
   #    frontend-cdn.yaml's SpaRoutingFunction). /arango_api/* keeps its URI.
+  #
+  # Token: "<exp>.<hex HMAC-SHA256(session-key, 'pr-<n>:<exp>')>", exp in epoch
+  # seconds. It is bound to one PR, so a shared link opens only that preview.
+  # The HMAC key is the KVS `session-key`; reading it needs IAM
+  # (cloudfront-keyvaluestore:GetKey), which is what gates access. Rotating it
+  # signs everyone out.
   #
   # The KVS id is substituted into the code because cf.kvs() needs it.
   # ============================================================================
@@ -261,7 +269,7 @@ Resources:
     Type: AWS::CloudFront::KeyValueStore
     Properties:
       Name: !Sub '${ProjectName}-${Environment}-preview-auth'
-      Comment: !Sub 'Basic-auth credential for ${ProjectName} ${Environment} PR previews (key: basic-auth)'
+      Comment: !Sub 'Session-cookie signing key for ${ProjectName} ${Environment} PR previews (key: session-key)'
 
   PreviewRouterFunction:
     Type: AWS::CloudFront::Function
@@ -269,29 +277,54 @@ Resources:
       Name: !Sub '${ProjectName}-${Environment}-preview-router'
       AutoPublish: true
       FunctionConfig:
-        Comment: Basic auth + pr-<n> host to S3 prefix routing for PR previews
+        Comment: Signed-cookie auth + pr-<n> host to S3 prefix routing for PR previews
         Runtime: cloudfront-js-2.0
         KeyValueStoreAssociations:
           - KeyValueStoreARN: !GetAtt PreviewAuthStore.Arn
       FunctionCode: !Sub
         - |
           import cf from 'cloudfront';
+          import crypto from 'crypto';
 
           const kvs = cf.kvs('${PreviewAuthStore.Id}');
           const DOMAIN = '${Environment}.${Domain}';
+          const COOKIE = 'preview_session';
+          const LOGIN_PATH = '/_preview/login';
 
           function notFound() {
             return { statusCode: 404, statusDescription: 'Not Found' };
           }
 
-          function unauthorized() {
+          function forbidden(pr, message) {
             return {
-              statusCode: 401,
-              statusDescription: 'Unauthorized',
+              statusCode: 403,
+              statusDescription: 'Forbidden',
               headers: {
-                'www-authenticate': { value: 'Basic realm="nlm-ckn preview", charset="UTF-8"' },
+                'content-type': { value: 'text/html; charset=utf-8' },
+                'cache-control': { value: 'no-store' },
+              },
+              body: {
+                encoding: 'text',
+                data: '<!doctype html><title>nlm-ckn preview</title><p>' + message +
+                  '</p><p>Get a sign-in link (needs AWS access) from nlm-ckn-ui:</p>' +
+                  '<pre>AWS_PROFILE=springbok ./scripts/ops/preview-login.sh ' + pr + '</pre>',
               },
             };
+          }
+
+          // Remaining lifetime in seconds, or 0 if the token is invalid or expired.
+          function verify(token, pr, key) {
+            const dot = token.indexOf('.');
+            const exp = token.substring(0, dot);
+            if (dot < 1 || !/^[0-9]{1,12}$/.test(exp)) {
+              return 0;
+            }
+            const ttl = Number(exp) - Math.floor(Date.now() / 1000);
+            if (ttl <= 0) {
+              return 0;
+            }
+            const sig = crypto.createHmac('sha256', key).update('pr-' + pr + ':' + exp).digest('hex');
+            return token.substring(dot + 1) === sig ? ttl : 0;
           }
 
           async function handler(event) {
@@ -305,17 +338,40 @@ Resources:
             }
             const pr = match[1];
 
-            let expected;
+            let key = '';
             try {
-              expected = await kvs.get('basic-auth');
+              key = await kvs.get('session-key');
             } catch (err) {
-              return unauthorized();
+              // Missing key → every token fails below.
             }
-            const supplied = headers.authorization ? headers.authorization.value : '';
-            if (!expected || supplied !== 'Basic ' + expected) {
-              return unauthorized();
+
+            if (request.uri === LOGIN_PATH) {
+              const token = request.querystring.token ? request.querystring.token.value : '';
+              const ttl = key ? verify(token, pr, key) : 0;
+              if (!ttl) {
+                return forbidden(pr, 'This sign-in link is invalid or has expired.');
+              }
+              return {
+                statusCode: 302,
+                statusDescription: 'Found',
+                headers: {
+                  location: { value: '/' },
+                  'cache-control': { value: 'no-store' },
+                },
+                cookies: {
+                  preview_session: {
+                    value: token,
+                    attributes: 'Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=' + ttl,
+                  },
+                },
+              };
             }
-            delete headers.authorization;
+
+            const cookie = request.cookies[COOKIE];
+            if (!key || !cookie || !verify(cookie.value, pr, key)) {
+              return forbidden(pr, 'Sign-in required.');
+            }
+            delete request.cookies[COOKIE];
 
             const uri = request.uri;
             if (uri.startsWith('/arango_api/')) {
@@ -1009,7 +1065,7 @@ Outputs:
     Value: !GetAtt PreviewDistribution.DomainName
 
   PreviewAuthStoreArn:
-    Description: KeyValueStore holding the basic-auth credential (key basic-auth)
+    Description: KeyValueStore holding the session-cookie signing key (key session-key)
     Value: !GetAtt PreviewAuthStore.Arn
     Export:
       Name: !Sub '${ProjectName}-${Environment}-preview-auth-kvs-arn'
