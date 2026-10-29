@@ -84,7 +84,7 @@ provisions and how the pieces connect:
 
 - **Wave 1** — `./deploy/01-deploy-account-setup.sh` — once per AWS account (bootstrap, shared, static-assets)
 - **Wave 2** (parallel) — `./deploy/02-deploy-environment.sh <env>` (platform tier, then frontend/arangodb/backend service stacks) and `./deploy/02-deploy-fetch.sh` (etl ECR + fetch)
-- **Wave 3** (parallel) — `./deploy/03-deploy-batch.sh` (needs the fetch stack), `./deploy/03-deploy-monitoring.sh <env>` (needs the environment stack, optional), `./deploy/03-deploy-preview-platform.sh <env>` (PR previews; needs the environment + CDN stacks, optional)
+- **Wave 3** (parallel) — `./deploy/03-deploy-batch.sh` (needs the fetch stack), `./deploy/03-deploy-monitoring.sh <env>` (needs the environment stack, optional), `./deploy/03-deploy-preview-platform.sh` (PR previews, dev only; needs dev's environment + CDN stacks, optional)
 - Then, in `nlm-ckn-ui`: `./scripts/app/deploy-backend.sh`, `deploy-frontend.sh`, `deploy-dataset.sh` to ship application code onto the provisioned infrastructure (dev/stage), or `./scripts/sandbox/deploy-sandbox.sh` for the sandbox account
 
 Three stacks fall outside the numbered waves entirely — rare, manual, singleton

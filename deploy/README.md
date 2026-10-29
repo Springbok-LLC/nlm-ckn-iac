@@ -20,14 +20,17 @@ waves with a lower number having finished.
 | 2 | `02-deploy-fetch.sh` | wave 1 (ArangoDB dataset bucket, via SSM) |
 | 3 | `03-deploy-batch.sh` | wave 2's `02-deploy-fetch.sh` (NCBI secret ARN output) |
 | 3 | `03-deploy-monitoring.sh <env>` | wave 2's `02-deploy-environment.sh` (arangodb/ALB outputs) |
-| 3 | `03-deploy-preview-platform.sh <env>` | wave 2's `02-deploy-environment.sh` incl. the CDN stack (ALB listener, cluster, web ACL exports) |
+| 3 | `03-deploy-preview-platform.sh` | wave 2's `02-deploy-environment.sh dev` incl. the CDN stack (ALB listener, cluster, web ACL exports) |
 
 `03-deploy-preview-platform.sh` also publishes `preview-pr.yaml` (versioned by
 git SHA) to the templates bucket and points SSM
-`/nlm-ckn/<env>/preview/pr-template-url` at its https URL; nlm-ckn-ui's preview
+`/nlm-ckn/dev/preview/pr-template-url` at its https URL; nlm-ckn-ui's preview
 workflow creates per-PR change sets from that URL (its CI role may use no other
-template, may not push images, and is trusted only from the protected `preview`
-GitHub environment). It also seeds a random
+template, may push images only to the preview ECR repo, and is trusted only
+from the protected `preview` GitHub environment). It is dev-only and
+takes no `<env>`: previews are the step before dev (PR → preview → dev →
+stage), built on dev's infrastructure, so there is one preview platform and
+per-PR stacks (`nlm-ckn-preview-pr-<n>`) carry no environment. It also seeds a random
 session-cookie signing key in the preview KeyValueStore (`session-key`) if none
 exists; nlm-ckn-ui's `scripts/ops/preview-login.sh <pr>` signs a link with it, and rotating
 it (command in the script's header) signs everyone out. Nothing secret is

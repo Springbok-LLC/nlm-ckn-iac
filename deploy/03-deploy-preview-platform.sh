@@ -2,15 +2,20 @@
 # ==============================================================================
 # 03-deploy-preview-platform.sh - Deploy the nlm-ckn-ui PR preview platform
 # ==============================================================================
-# Wave 3 (needs 02-deploy-environment.sh's infra + frontend-cdn exports).
+# Wave 3 (needs 02-deploy-environment.sh's dev infra + frontend-cdn exports).
+#
+# Dev only. Previews are the step before dev (PR → preview → dev → stage)
+# and run on dev's ALB, cluster, secrets and ArangoDB, so there is exactly one
+# preview platform and no <env> argument. Per-PR stacks are named
+# nlm-ckn-preview-pr-<n> for the same reason.
 #
 #   1. Lints environment/preview/cloudformation/*.yaml (cfn-lint errors abort).
 #   2. Deploys preview-platform.yaml as the stack
-#        nlm-ckn-<env>-preview-platform        (us-east-1 only)
+#        nlm-ckn-dev-preview-platform        (us-east-1 only)
 #   3. Uploads preview-pr.yaml to the templates bucket at
 #        s3://<templates bucket>/preview/preview-pr-<git sha>.yaml
 #      and writes its https URL to SSM
-#        /nlm-ckn/<env>/preview/pr-template-url
+#        /nlm-ckn/dev/preview/pr-template-url
 #      which nlm-ckn-ui's preview.yml passes to `create-change-set
 #      --template-url`. The preview CI role may only create change sets from
 #      that preview/ prefix, so publishing a template version is an explicit
@@ -20,7 +25,7 @@
 # protected GitHub environment named `preview` (required reviewers) — the CI
 # role trusts only repo:Springbok-LLC/nlm-ckn-ui:environment:preview — and it
 # builds the PR's backend image and pushes it to the preview ECR repo
-# (<project>-<env>-preview-backend; the CI role can push nowhere else).
+# (<project>-dev-preview-backend; the CI role can push nowhere else).
 #
 # The per-PR template is keyed by the commit SHA, so the working tree must be
 # clean. There is deliberately no override: every object under preview/ is
@@ -34,28 +39,27 @@
 # To rotate the key (signs everyone out; no redeploy):
 #
 #   KVS_ARN=$(aws cloudformation describe-stacks --region us-east-1 \
-#     --stack-name nlm-ckn-<env>-preview-platform \
+#     --stack-name nlm-ckn-dev-preview-platform \
 #     --query "Stacks[0].Outputs[?OutputKey=='PreviewAuthStoreArn'].OutputValue" --output text)
 #   ETAG=$(aws cloudfront-keyvaluestore describe-key-value-store \
 #     --kvs-arn "$KVS_ARN" --query ETag --output text)
 #   aws cloudfront-keyvaluestore put-key --kvs-arn "$KVS_ARN" --if-match "$ETAG" \
 #     --key session-key --value "$(openssl rand -hex 32)"
 #
-# The environment's ECS cluster must have the FARGATE_SPOT capacity provider
+# Dev's ECS cluster must have the FARGATE_SPOT capacity provider
 # (ecs-cluster.yaml, deployed by 02-deploy-environment.sh --infra-only).
 #
 # USAGE:
-#   AWS_PROFILE=springbok ./deploy/03-deploy-preview-platform.sh <env> [--auto-approve]
-#     env: dev (default) or stage
+#   AWS_PROFILE=springbok ./deploy/03-deploy-preview-platform.sh [--auto-approve]
 # ==============================================================================
 set -euo pipefail
 
 # Change to repo root (script lives in deploy/) so relative paths resolve.
 cd "$(dirname "$0")/.."
 
-ENVIRONMENT="${1:-dev}"
+ENVIRONMENT=dev
 AUTO_APPROVE=false
-for arg in "${@:2}"; do
+for arg in "$@"; do
   case "$arg" in
     --auto-approve) AUTO_APPROVE=true ;;
     *) echo "Error: unknown option: $arg (valid: --auto-approve)" >&2; exit 1 ;;
@@ -71,11 +75,6 @@ TEMPLATE_DIR="environment/preview/cloudformation"
 PLATFORM_TEMPLATE="${TEMPLATE_DIR}/preview-platform.yaml"
 PR_TEMPLATE="${TEMPLATE_DIR}/preview-pr.yaml"
 TEMPLATE_PARAM="/${PROJECT_NAME}/${ENVIRONMENT}/preview/pr-template-url"
-
-if [[ ! "$ENVIRONMENT" =~ ^(dev|stage)$ ]]; then
-  echo "Error: environment must be dev or stage" >&2
-  exit 1
-fi
 
 # ── Template version (git SHA) ───────────────────────────────────────────────
 GIT_SHA=$(git rev-parse --short=12 HEAD)
@@ -190,4 +189,4 @@ echo "Set these as nlm-ckn-ui repository variables for preview.yml:"
 echo "  PreviewCiRoleArn, PreviewServiceRoleArn, PreviewBucketName, PreviewDistributionId,"
 echo "  PreviewEcrRepositoryUri (above)"
 echo ""
-echo "Open a preview (from nlm-ckn-ui): AWS_PROFILE=${AWS_PROFILE:-<profile>} ./scripts/ops/preview-login.sh <pr> --env ${ENVIRONMENT}"
+echo "Open a preview (from nlm-ckn-ui): AWS_PROFILE=${AWS_PROFILE:-<profile>} ./scripts/ops/preview-login.sh <pr>"

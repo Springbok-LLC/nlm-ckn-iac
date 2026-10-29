@@ -48,10 +48,9 @@ Parameters:
   Environment:
     Type: String
     Default: dev
-    Description: Environment whose ALB, cluster, secrets and ArangoDB this preview shares
+    Description: Environment whose ALB, cluster, secrets and ArangoDB this preview shares (dev only)
     AllowedValues:
       - dev
-      - stage
 
   PrNumber:
     Type: Number
@@ -92,10 +91,6 @@ Metadata:
           - PrNumber
           - ImageTag
           - ExpiresAt
-
-Conditions:
-  # Mirrors backend.yaml: dev tasks get a public IP.
-  IsDev: !Equals [!Ref Environment, 'dev']
 
 Resources:
   # ============================================================================
@@ -306,7 +301,7 @@ Resources:
         AwsvpcConfiguration:
           # Same as backend.yaml: dev's default-VPC subnets have no NAT, so the
           # task needs a public IP to reach ECR/Secrets Manager.
-          AssignPublicIp: !If [IsDev, ENABLED, DISABLED]
+          AssignPublicIp: ENABLED
           Subnets: !Split
             - ','
             - !ImportValue

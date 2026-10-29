@@ -11,11 +11,15 @@ Description: >-
 
 # ── Deployment ────────────────────────────────────────────────────────────────
 #
-# Deployed by deploy/03-deploy-preview-platform.sh <env> as the stack
-#   nlm-ckn-<env>-preview-platform
+# Deployed by deploy/03-deploy-preview-platform.sh as the stack
+#   nlm-ckn-dev-preview-platform
 # in us-east-1 (CloudFront certificates and CLOUDFRONT-scope web ACLs only live
 # there). The script also publishes preview-pr.yaml to the templates bucket and
 # points SSM /<project>/<env>/preview/pr-template-url at it.
+#
+# Dev only — previews are the step before dev (PR → preview → dev → stage),
+# built on dev's infrastructure. There is one platform per account, which is
+# why per-PR stacks (${ProjectName}-preview-pr-<n>) carry no environment.
 #
 # Depends on these exports (all deployed by 02-deploy-environment.sh):
 #   ${ProjectName}-${Environment}-domain-name           (main.yaml)
@@ -43,10 +47,10 @@ Parameters:
     Default: dev
     Description: >-
       Environment whose ALB, cluster, secrets and ArangoDB previews share.
-      Previews are served at pr-<n>.<Environment>.<domain>.
+      Previews are served at pr-<n>.<Environment>.<domain>. Dev only:
+      previews are the step before dev, so there is one platform.
     AllowedValues:
       - dev
-      - stage
 
   GitHubSubject:
     Type: String
