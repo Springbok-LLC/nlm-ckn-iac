@@ -88,7 +88,7 @@ if command -v cfn-lint &>/dev/null; then
   echo "==> Linting ${TEMPLATE_DIR}/*.yaml"
   # cfn-lint exit code is a bitmask: 2 = error, 4 = warning, 8 = info.
   rc=0
-  cfn-lint "${TEMPLATE_DIR}"/*.yaml || rc=$?
+  cfn-lint --append-rules=.cfn-lint-rules "${TEMPLATE_DIR}"/*.yaml || rc=$?
   if (( rc & 2 )); then
     echo "Error: cfn-lint reported errors" >&2
     exit 1

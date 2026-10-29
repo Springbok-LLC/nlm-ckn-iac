@@ -75,8 +75,9 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t FILES <<< "$TEMPLATES"
-          # Uses the repo's .cfnlintrc.yaml automatically.
-          cfn-lint "${FILES[@]}"
+          # Uses the repo's .cfnlintrc.yaml automatically; custom rules must be
+          # passed on the CLI (cfn-lint refuses append_rules in that file).
+          cfn-lint --append-rules=.cfn-lint-rules "${FILES[@]}"
 
       - name: Dry run — resolve nested-stack references
         if: steps.changed.outputs.templates != ''

@@ -141,7 +141,7 @@ echo ""
 # Validate templates with cfn-lint if available
 if command -v cfn-lint &> /dev/null; then
   echo -e "${GREEN}==> Validating templates with cfn-lint${NC}"
-  cfn-lint account/cloudformation/*.yaml shared/cloudformation/*.yaml \
+  cfn-lint --append-rules=.cfn-lint-rules account/cloudformation/*.yaml shared/cloudformation/*.yaml \
     environment/platform/cloudformation/*.yaml environment/services/*/cloudformation/*.yaml \
     etl/cloudformation/*.yaml manual/*/cloudformation/*.yaml || {
     echo -e "${YELLOW}⚠ cfn-lint found warnings (non-blocking)${NC}"
