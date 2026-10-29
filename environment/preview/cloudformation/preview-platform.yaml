@@ -1,0 +1,1099 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  PR preview platform — the fixed, deployed-once half of the nlm-ckn-ui PR
+  preview environments: a wildcard ACM cert (also attached to dev's :8000 ALB
+  listener as an SNI cert), the preview S3 bucket, one wildcard CloudFront
+  distribution (*.<env>.<domain>) with a signed-cookie auth / host-routing
+  CloudFront Function backed by a KeyValueStore, the wildcard Route 53 records, the
+  CloudFormation service role that per-PR stacks run under, the GitHub OIDC CI
+  role nlm-ckn-ui's preview workflow assumes, and an hourly sweeper that deletes
+  expired preview stacks. The per-PR half is preview-pr.yaml.
+
+# ── Deployment ────────────────────────────────────────────────────────────────
+#
+# Deployed by deploy/03-deploy-preview-platform.sh as the stack
+#   nlm-ckn-dev-preview-platform
+# in us-east-1 (CloudFront certificates and CLOUDFRONT-scope web ACLs only live
+# there). The script also publishes preview-pr.yaml to the templates bucket and
+# points SSM /<project>/<env>/preview/pr-template-url at it.
+#
+# Dev only — previews are the step before dev (PR → preview → dev → stage),
+# built on dev's infrastructure. There is one platform per account, which is
+# why per-PR stacks (${ProjectName}-preview-pr-<n>) carry no environment.
+#
+# Depends on these exports (all deployed by 02-deploy-environment.sh):
+#   ${ProjectName}-${Environment}-domain-name           (main.yaml)
+#   ${ProjectName}-${Environment}-hosted-zone-id        (main.yaml)
+#   ${ProjectName}-${Environment}-alb-dns               (alb.yaml)
+#   ${ProjectName}-${Environment}-backend-listener-arn  (alb.yaml)
+#   ${ProjectName}-${Environment}-cluster-name          (ecs-cluster.yaml)
+#   ${ProjectName}-${Environment}-cloudfront-waf-arn    (frontend-cdn.yaml)
+#   ${ProjectName}-templates-bucket                     (account/bootstrap.yaml)
+#   ${ProjectName}-github-oidc-arn                      (account/bootstrap.yaml)
+#
+# The session-cookie signing key is NOT in this template. The deploy script
+# seeds a random one in the KeyValueStore under the key `session-key` if it is
+# missing — see deploy/03-deploy-preview-platform.sh. Until it is seeded every
+# preview request gets 403.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: nlm-ckn
+    Description: Project name for resource naming
+
+  Environment:
+    Type: String
+    Default: dev
+    Description: >-
+      Environment whose ALB, cluster, secrets and ArangoDB previews share.
+      Previews are served at pr-<n>.<Environment>.<domain>. Dev only:
+      previews are the step before dev, so there is one platform.
+    AllowedValues:
+      - dev
+
+  GitHubSubject:
+    Type: String
+    Default: 'repo:Springbok-LLC/nlm-ckn-ui:environment:preview'
+    Description: >-
+      The only GitHub OIDC `sub` claim allowed to assume the preview CI role:
+      jobs that run in nlm-ckn-ui's protected `preview` GitHub environment.
+      The environment's required reviewers are the real gate — a PR author can
+      edit workflows on their branch, so a workflow-level label check or a
+      `pull_request` subject alone would not stop them assuming this role.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Configuration
+        Parameters:
+          - ProjectName
+          - Environment
+      - Label:
+          default: CI
+        Parameters:
+          - GitHubSubject
+
+Resources:
+  # ============================================================================
+  # Wildcard certificate — *.<env>.<domain>
+  #
+  # Used twice: as the CloudFront viewer certificate, and as an extra SNI cert
+  # on dev's :8000 ALB listener. The /arango_api/* behaviour forwards the
+  # viewer's Host (Managed-AllViewer), so CloudFront validates the origin's
+  # certificate against pr-<n>.<env>.<domain>; dev's own cert only covers
+  # <env>.<domain>.
+  # ============================================================================
+  PreviewCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub
+        - '*.${Environment}.${Domain}'
+        - Domain: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-domain-name'
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Sub
+            - '*.${Environment}.${Domain}'
+            - Domain: !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-domain-name'
+          HostedZoneId: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-hosted-zone-id'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-cert'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  PreviewListenerCertificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties:
+      ListenerArn: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-backend-listener-arn'
+      Certificates:
+        - CertificateArn: !Ref PreviewCertificate
+
+  # ============================================================================
+  # Preview S3 bucket — one pr-<n>/ prefix per PR, written by the CI role,
+  # read only by the preview distribution (OAC).
+  # ============================================================================
+  PreviewBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-preview-${AWS::AccountId}'
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-bucket'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  # ============================================================================
+  # Preview ECR repo — PR backend images (pr-<n>-<sha>), pushed by the CI role.
+  # Kept apart from the shared nlm-ckn-backend repo so preview CI can never
+  # overwrite a tag dev/stage run. Tags are immutable and every image expires
+  # 7 days after push (previews live at most 3). The tasks pull with dev's
+  # backend execution role (AmazonECSTaskExecutionRolePolicy covers any repo).
+  # ============================================================================
+  PreviewEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-${Environment}-preview-backend'
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire preview images 7 days after push",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-backend'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  PreviewOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${ProjectName}-${Environment}-preview-oac'
+        Description: !Sub 'OAC for ${ProjectName} ${Environment} PR previews'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  PreviewBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PreviewBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${PreviewBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${PreviewDistribution}'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt PreviewBucket.Arn
+              - !Sub '${PreviewBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # ============================================================================
+  # Signed-cookie auth + host routing (viewer-request, BOTH behaviours)
+  #
+  # 1. Only pr-<digits>.<env>.<domain> hosts are served; anything else → 404.
+  # 2. GET /_preview/login?token=<t> with a valid token sets the
+  #    preview_session cookie (HttpOnly, host-only, expires with the token) and
+  #    302s to /. nlm-ckn-ui's scripts/ops/preview-login.sh mints these links.
+  # 3. Every other request needs a valid preview_session cookie; otherwise 403
+  #    with a page saying how to get a link. A missing KVS key fails closed.
+  # 4. The cookie is then deleted, so the backend (AllViewer) never sees it.
+  # 5. S3 behaviour only: rewrite the URI into the PR's prefix, with SPA
+  #    fallback to /pr-<n>/index.html for extension-less paths (same rule as
+  #    frontend-cdn.yaml's SpaRoutingFunction). /arango_api/* keeps its URI.
+  #
+  # Token: "<exp>.<hex HMAC-SHA256(session-key, 'pr-<n>:<exp>')>", exp in epoch
+  # seconds. It is bound to one PR, so a shared link opens only that preview.
+  # The HMAC key is the KVS `session-key`; reading it needs IAM
+  # (cloudfront-keyvaluestore:GetKey), which is what gates access. Rotating it
+  # signs everyone out.
+  #
+  # The KVS id is substituted into the code because cf.kvs() needs it.
+  # ============================================================================
+  PreviewAuthStore:
+    Type: AWS::CloudFront::KeyValueStore
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-preview-auth'
+      Comment: !Sub 'Session-cookie signing key for ${ProjectName} ${Environment} PR previews (key: session-key)'
+
+  PreviewRouterFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-preview-router'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Signed-cookie auth + pr-<n> host to S3 prefix routing for PR previews
+        Runtime: cloudfront-js-2.0
+        KeyValueStoreAssociations:
+          - KeyValueStoreARN: !GetAtt PreviewAuthStore.Arn
+      FunctionCode: !Sub
+        - |
+          import cf from 'cloudfront';
+          import crypto from 'crypto';
+
+          const kvs = cf.kvs('${PreviewAuthStore.Id}');
+          const DOMAIN = '${Environment}.${Domain}';
+          const COOKIE = 'preview_session';
+          const LOGIN_PATH = '/_preview/login';
+
+          function notFound() {
+            return { statusCode: 404, statusDescription: 'Not Found' };
+          }
+
+          function forbidden(pr, message) {
+            return {
+              statusCode: 403,
+              statusDescription: 'Forbidden',
+              headers: {
+                'content-type': { value: 'text/html; charset=utf-8' },
+                'cache-control': { value: 'no-store' },
+              },
+              body: {
+                encoding: 'text',
+                data: '<!doctype html><title>nlm-ckn preview</title><p>' + message +
+                  '</p><p>Get a sign-in link (needs AWS access) from nlm-ckn-ui:</p>' +
+                  '<pre>AWS_PROFILE=springbok ./scripts/ops/preview-login.sh ' + pr + '</pre>',
+              },
+            };
+          }
+
+          // Remaining lifetime in seconds, or 0 if the token is invalid or expired.
+          function verify(token, pr, key) {
+            const dot = token.indexOf('.');
+            const exp = token.substring(0, dot);
+            if (dot < 1 || !/^[0-9]{1,12}$/.test(exp)) {
+              return 0;
+            }
+            const ttl = Number(exp) - Math.floor(Date.now() / 1000);
+            if (ttl <= 0) {
+              return 0;
+            }
+            const sig = crypto.createHmac('sha256', key).update('pr-' + pr + ':' + exp).digest('hex');
+            return token.substring(dot + 1) === sig ? ttl : 0;
+          }
+
+          async function handler(event) {
+            const request = event.request;
+            const headers = request.headers;
+
+            const host = headers.host ? headers.host.value.toLowerCase() : '';
+            const match = host.match(/^pr-([1-9][0-9]{0,4})\./);
+            if (!match || host !== 'pr-' + match[1] + '.' + DOMAIN) {
+              return notFound();
+            }
+            const pr = match[1];
+
+            let key = '';
+            try {
+              key = await kvs.get('session-key');
+            } catch (err) {
+              // Missing key → every token fails below.
+            }
+
+            if (request.uri === LOGIN_PATH) {
+              const token = request.querystring.token ? request.querystring.token.value : '';
+              const ttl = key ? verify(token, pr, key) : 0;
+              if (!ttl) {
+                return forbidden(pr, 'This sign-in link is invalid or has expired.');
+              }
+              return {
+                statusCode: 302,
+                statusDescription: 'Found',
+                headers: {
+                  location: { value: '/' },
+                  'cache-control': { value: 'no-store' },
+                },
+                cookies: {
+                  preview_session: {
+                    value: token,
+                    attributes: 'Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=' + ttl,
+                  },
+                },
+              };
+            }
+
+            const cookie = request.cookies[COOKIE];
+            if (!key || !cookie || !verify(cookie.value, pr, key)) {
+              return forbidden(pr, 'Sign-in required.');
+            }
+            delete request.cookies[COOKIE];
+
+            const uri = request.uri;
+            if (uri.startsWith('/arango_api/')) {
+              return request;
+            }
+            const lastSegment = uri.substring(uri.lastIndexOf('/') + 1);
+            // No '.' in the final path segment → a client-side route, not a file.
+            if (lastSegment.indexOf('.') === -1) {
+              request.uri = '/pr-' + pr + '/index.html';
+            } else {
+              request.uri = '/pr-' + pr + uri;
+            }
+            return request;
+          }
+        - Domain: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-domain-name'
+
+  # ============================================================================
+  # Wildcard CloudFront distribution — every preview, one distribution.
+  # Behaviours mirror frontend-cdn.yaml; the router function replaces its
+  # SpaRoutingFunction and is on both behaviours (auth must cover the API too).
+  # Dev's web ACL (exported by frontend-cdn.yaml) is reused.
+  # ============================================================================
+  PreviewDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        WebACLId: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-cloudfront-waf-arn'
+        Comment: !Sub '${ProjectName} ${Environment} PR previews'
+        Aliases:
+          - !Sub
+            - '*.${Environment}.${Domain}'
+            - Domain: !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-domain-name'
+
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt PreviewBucket.RegionalDomainName
+            OriginAccessControlId: !Ref PreviewOAC
+            S3OriginConfig: {}
+
+          # Dev's ALB :8000. Preview listener rules (preview-pr.yaml) match on
+          # host pr-<n> AND this header, ahead of dev's priority-50000 rule.
+          - Id: ALBOrigin
+            DomainName: !ImportValue
+              Fn::Sub: '${ProjectName}-${Environment}-alb-dns'
+            CustomOriginConfig:
+              HTTPSPort: 8000
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+            OriginCustomHeaders:
+              - HeaderName: X-Custom-Origin-Header
+                HeaderValue: !Sub '{{resolve:secretsmanager:/${ProjectName}/${Environment}/secrets/cloudfront-secret:SecretString}}'
+
+        # Default behaviour (S3). The router rewrites the URI to /pr-<n>/...
+        # before the cache lookup, so the cache key is per-PR.
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # Managed-CachingOptimized
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt PreviewRouterFunction.FunctionMetadata.FunctionARN
+
+        CacheBehaviors:
+          # Backend API → dev ALB → the PR's listener rule → the PR's task
+          - PathPattern: /arango_api/*
+            TargetOriginId: ALBOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - POST
+              - PATCH
+              - DELETE
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # Managed-CachingDisabled
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # Managed-AllViewer
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt PreviewRouterFunction.FunctionMetadata.FunctionARN
+
+        ViewerCertificate:
+          AcmCertificateArn: !Ref PreviewCertificate
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+
+        PriceClass: PriceClass_100
+
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-cloudfront'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  # ============================================================================
+  # Route 53 — *.<env>.<domain> → preview distribution.
+  # Unlike frontend-cdn.yaml's apex record, the wildcard name is new and owned
+  # only by this stack, so CloudFormation can manage it without a CREATE clash.
+  # ============================================================================
+  PreviewRecordA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-hosted-zone-id'
+      Name: !Sub
+        - '*.${Environment}.${Domain}.'
+        - Domain: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-domain-name'
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt PreviewDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront's fixed alias hosted zone
+        EvaluateTargetHealth: false
+
+  PreviewRecordAAAA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-hosted-zone-id'
+      Name: !Sub
+        - '*.${Environment}.${Domain}.'
+        - Domain: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-domain-name'
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt PreviewDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  # ============================================================================
+  # Preview CloudFormation service role
+  #
+  # Every nlm-ckn-preview-pr-* stack is deployed with --role-arn this role, so
+  # it — not the CI role — creates the per-PR resources. Scoped to:
+  #   - task definitions in the <project>-<env>-preview-pr-* family
+  #   - services named <project>-<env>-preview-pr-* in <env>'s cluster
+  #   - target groups named <project>-<env>-pr-*
+  #   - listener rules on <env>'s :8000 listener only
+  #   - passing <env>'s backend task/execution roles to ECS
+  #   - log groups /ecs/<project>-<env>-preview-pr-*
+  #   - resolving the origin secret (Secrets Manager) dynamic reference in
+  #     preview-pr.yaml
+  # ============================================================================
+  PreviewServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-preview-cfn'
+      Description: CloudFormation service role for nlm-ckn-ui PR preview stacks
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: PreviewStackResources
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Register/Deregister/Describe task definition do not support
+              # resource-level permissions.
+              - Sid: EcsTaskDefinitions
+                Effect: Allow
+                Action:
+                  - ecs:RegisterTaskDefinition
+                  - ecs:DeregisterTaskDefinition
+                  - ecs:DescribeTaskDefinition
+                Resource: '*'
+              - Sid: EcsTagTaskDefinitions
+                Effect: Allow
+                Action:
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                Resource: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${ProjectName}-${Environment}-preview-pr-*:*'
+              - Sid: EcsServices
+                Effect: Allow
+                Action:
+                  - ecs:CreateService
+                  - ecs:UpdateService
+                  - ecs:DeleteService
+                  - ecs:DescribeServices
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/${Cluster}/${ProjectName}-${Environment}-preview-pr-*'
+                  - Cluster: !ImportValue
+                      Fn::Sub: '${ProjectName}-${Environment}-cluster-name'
+              - Sid: PassBackendRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-backend-exec'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-backend-task'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+              - Sid: ElbDescribe
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTargetGroupAttributes
+                  - elasticloadbalancing:DescribeRules
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:DescribeTags
+                Resource: '*'
+              - Sid: ElbTargetGroups
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:CreateTargetGroup
+                  - elasticloadbalancing:DeleteTargetGroup
+                  - elasticloadbalancing:ModifyTargetGroup
+                  - elasticloadbalancing:ModifyTargetGroupAttributes
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:RemoveTags
+                Resource: !Sub 'arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:targetgroup/${ProjectName}-${Environment}-pr-*/*'
+              # CreateRule is authorised against the listener; the rule ARNs
+              # (listener-rule/app/<alb>/<id>/<listener-id>/<rule-id>) share
+              # the listener's path, so this pins both to the :8000 listener.
+              - Sid: ElbCreateRuleOnBackendListener
+                Effect: Allow
+                Action: elasticloadbalancing:CreateRule
+                Resource: !ImportValue
+                  Fn::Sub: '${ProjectName}-${Environment}-backend-listener-arn'
+              - Sid: ElbManageRulesOnBackendListener
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:ModifyRule
+                  - elasticloadbalancing:DeleteRule
+                  - elasticloadbalancing:SetRulePriorities
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:RemoveTags
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:listener-rule/${ListenerPath}/*'
+                  - ListenerPath: !Select
+                      - 1
+                      - !Split
+                        - ':listener/'
+                        - !ImportValue
+                            Fn::Sub: '${ProjectName}-${Environment}-backend-listener-arn'
+              - Sid: LogGroupsDescribe
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: '*'
+              - Sid: LogGroups
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteRetentionPolicy
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - logs:TagLogGroup
+                  - logs:ListTagsForResource
+                  - logs:ListTagsLogGroup
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ProjectName}-${Environment}-preview-pr-*'
+              # Dynamic references in preview-pr.yaml are resolved with this role.
+              - Sid: ResolveOriginSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/${ProjectName}/${Environment}/secrets/cloudfront-secret-*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-cfn-role'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  # ============================================================================
+  # Preview CI role — assumed by nlm-ckn-ui's preview.yml via GitHub OIDC, from
+  # jobs in the protected `preview` GitHub environment only (GitHubSubject).
+  # Reuses the account's OIDC provider (account/bootstrap.yaml export).
+  #
+  # It can only create change sets on nlm-ckn-preview-pr-* stacks that
+  #   - run as the preview service role (cloudformation:RoleArn), and
+  #   - use a template from the templates bucket's preview/ prefix
+  #     (cloudformation:TemplateUrl), i.e. a preview-pr.yaml version published
+  #     by deploy/03-deploy-preview-platform.sh.
+  # So it cannot hand the service role an arbitrary template (e.g. a listener
+  # rule matching dev's own host). CreateStack/UpdateStack are not granted and
+  # `aws cloudformation deploy` (which sends the template inline, with no
+  # TemplateUrl) is refused: the workflow uses create-change-set
+  # --template-url <SSM value> + execute-change-set.
+  #
+  # Its only ECR access is push/pull on the preview repo (PreviewEcrRepository),
+  # so CI cannot overwrite tags in the shared repo that other environments use.
+  # ============================================================================
+  PreviewCiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-preview-ci'
+      Description: Assumed by nlm-ckn-ui preview.yml (preview environment) to deploy PR previews
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !ImportValue
+                Fn::Sub: '${ProjectName}-github-oidc-arn'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Ref GitHubSubject
+      Policies:
+        - PolicyName: PreviewCi
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Both conditions must hold; a request without a TemplateUrl
+              # (inline TemplateBody, UsePreviousTemplate) does not match the
+              # StringLike and is denied.
+              - Sid: PublishedTemplateChangeSetsViaServiceRole
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-preview-pr-*/*'
+                Condition:
+                  StringEquals:
+                    cloudformation:RoleArn: !GetAtt PreviewServiceRole.Arn
+                  StringLike:
+                    # The URL forms S3 accepts for this bucket; the deploy
+                    # script publishes the first one.
+                    cloudformation:TemplateUrl:
+                      - !Sub
+                        - 'https://${Bucket}.s3.${AWS::Region}.amazonaws.com/preview/*'
+                        - Bucket: !ImportValue
+                            Fn::Sub: '${ProjectName}-templates-bucket'
+                      - !Sub
+                        - 'https://${Bucket}.s3.amazonaws.com/preview/*'
+                        - Bucket: !ImportValue
+                            Fn::Sub: '${ProjectName}-templates-bucket'
+                      - !Sub
+                        - 'https://s3.${AWS::Region}.amazonaws.com/${Bucket}/preview/*'
+                        - Bucket: !ImportValue
+                            Fn::Sub: '${ProjectName}-templates-bucket'
+                      - !Sub
+                        - 'https://s3.amazonaws.com/${Bucket}/preview/*'
+                        - Bucket: !ImportValue
+                            Fn::Sub: '${ProjectName}-templates-bucket'
+              - Sid: PreviewStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:TagResource
+                  - cloudformation:UntagResource
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-preview-pr-*/*'
+              - Sid: TemplateSummary
+                Effect: Allow
+                Action:
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ValidateTemplate
+                Resource: '*'
+              - Sid: PassServiceRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt PreviewServiceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              # docker login; the token itself grants nothing beyond the
+              # repository statement below.
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              # Push PR images (and skip the build when the tag already
+              # exists) — preview repo only.
+              - Sid: PreviewEcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt PreviewEcrRepository.Arn
+              - Sid: PreviewBucketList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt PreviewBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: 'pr-*'
+              - Sid: PreviewBucketObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${PreviewBucket.Arn}/pr-*'
+              - Sid: ReadTemplateLocation
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/${Environment}/preview/pr-template-url'
+              # CloudFormation fetches TemplateURL with the caller's credentials.
+              - Sid: ReadPreviewTemplates
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:s3:::${Bucket}/preview/*'
+                  - Bucket: !ImportValue
+                      Fn::Sub: '${ProjectName}-templates-bucket'
+              - Sid: InvalidatePreviews
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
+                Resource: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${PreviewDistribution}'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-ci-role'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  # ============================================================================
+  # Expiry sweeper — hourly. Deletes <project>-preview-pr-* stacks whose
+  # ExpiresAt stack tag (falling back to the ExpiresAt parameter) is in the
+  # past, and removes that PR's pr-<n>/ prefix from the preview bucket. Also
+  # catches stacks left behind by a failed CI teardown. DeleteStack runs under
+  # the stack's own service role, hence the PassRole grant.
+  # ============================================================================
+  SweeperLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-${Environment}-preview-sweeper'
+      RetentionInDays: 14
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-sweeper-logs'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  SweeperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-preview-sweeper'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PreviewSweeper
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub '${SweeperLogGroup.Arn}:*'
+              - Sid: ListStacks
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: '*'
+              - Sid: DeletePreviewStacks
+                Effect: Allow
+                Action: cloudformation:DeleteStack
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-preview-pr-*/*'
+              - Sid: PassServiceRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt PreviewServiceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: PreviewBucketList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt PreviewBucket.Arn
+              - Sid: PreviewBucketDelete
+                Effect: Allow
+                Action: s3:DeleteObject
+                Resource: !Sub '${PreviewBucket.Arn}/pr-*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-sweeper-role'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  SweeperFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-preview-sweeper'
+      Description: Deletes expired nlm-ckn-ui PR preview stacks and their S3 prefixes
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 300
+      MemorySize: 128
+      Role: !GetAtt SweeperRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref SweeperLogGroup
+      Environment:
+        Variables:
+          STACK_PREFIX: !Sub '${ProjectName}-preview-pr-'
+          PREVIEW_BUCKET: !Ref PreviewBucket
+      Code:
+        ZipFile: |
+          import datetime
+          import os
+          import re
+
+          import boto3
+
+          STACK_PREFIX = os.environ["STACK_PREFIX"]
+          BUCKET = os.environ["PREVIEW_BUCKET"]
+          SKIP_STATUSES = {"DELETE_IN_PROGRESS", "DELETE_COMPLETE"}
+
+          cfn = boto3.client("cloudformation")
+          s3 = boto3.client("s3")
+
+
+          def _expires_at(stack):
+              """ExpiresAt from the stack tag, else the stack parameter."""
+              for tag in stack.get("Tags", []):
+                  if tag["Key"] == "ExpiresAt":
+                      return tag["Value"]
+              for param in stack.get("Parameters", []):
+                  if param["ParameterKey"] == "ExpiresAt":
+                      return param.get("ParameterValue")
+              return None
+
+
+          def _parse(value):
+              dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+              if dt.tzinfo is None:
+                  dt = dt.replace(tzinfo=datetime.timezone.utc)
+              return dt
+
+
+          def _delete_prefix(prefix):
+              paginator = s3.get_paginator("list_objects_v2")
+              for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix):
+                  keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                  if keys:
+                      s3.delete_objects(Bucket=BUCKET, Delete={"Objects": keys, "Quiet": True})
+
+
+          def handler(event, context):
+              now = datetime.datetime.now(datetime.timezone.utc)
+              deleted = []
+              for page in cfn.get_paginator("describe_stacks").paginate():
+                  for stack in page["Stacks"]:
+                      name = stack["StackName"]
+                      match = re.fullmatch(re.escape(STACK_PREFIX) + r"(\d+)", name)
+                      if not match or stack["StackStatus"] in SKIP_STATUSES:
+                          continue
+                      raw = _expires_at(stack)
+                      try:
+                          expires = _parse(raw)
+                      except (AttributeError, TypeError, ValueError):
+                          print(f"{name}: no valid ExpiresAt ({raw!r}); skipping")
+                          continue
+                      if expires > now:
+                          continue
+                      print(f"{name}: expired at {raw}; deleting stack and pr-{match.group(1)}/")
+                      cfn.delete_stack(StackName=name)
+                      _delete_prefix(f"pr-{match.group(1)}/")
+                      deleted.append(name)
+              return {"deleted": deleted}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-preview-sweeper'
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
+  SweeperSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-preview-sweeper'
+      Description: Hourly sweep of expired PR preview stacks
+      ScheduleExpression: rate(1 hour)
+      State: ENABLED
+      Targets:
+        - Id: sweeper
+          Arn: !GetAtt SweeperFunction.Arn
+
+  SweeperInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SweeperFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SweeperSchedule.Arn
+
+Outputs:
+  PreviewDomain:
+    Description: Previews are served at https://pr-<n>.<this>
+    Value: !Sub
+      - '${Environment}.${Domain}'
+      - Domain: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-domain-name'
+
+  PreviewBucketName:
+    Description: Preview frontend bucket (CI syncs builds to pr-<n>/)
+    Value: !Ref PreviewBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-preview-bucket'
+
+  PreviewDistributionId:
+    Description: Preview CloudFront distribution ID (CI invalidates /pr-<n>/*)
+    Value: !Ref PreviewDistribution
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-preview-cloudfront-id'
+
+  PreviewDistributionDomainName:
+    Description: Preview CloudFront domain name
+    Value: !GetAtt PreviewDistribution.DomainName
+
+  PreviewAuthStoreArn:
+    Description: KeyValueStore holding the session-cookie signing key (key session-key)
+    Value: !GetAtt PreviewAuthStore.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-preview-auth-kvs-arn'
+
+  PreviewEcrRepositoryName:
+    Description: Preview backend ECR repo (CI pushes pr-<n>-<sha> tags)
+    Value: !Ref PreviewEcrRepository
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-preview-ecr-name'
+
+  PreviewEcrRepositoryUri:
+    Description: Preview backend ECR repo URI (preview-pr.yaml image prefix)
+    Value: !GetAtt PreviewEcrRepository.RepositoryUri
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-preview-ecr-uri'
+
+  PreviewServiceRoleArn:
+    Description: CloudFormation service role for preview stacks (--role-arn)
+    Value: !GetAtt PreviewServiceRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-preview-service-role-arn'
+
+  PreviewCiRoleArn:
+    Description: GitHub OIDC role for nlm-ckn-ui preview.yml
+    Value: !GetAtt PreviewCiRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-preview-ci-role-arn'

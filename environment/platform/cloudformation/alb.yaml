@@ -252,8 +252,13 @@ Resources:
   # caching, and WAF protections).
   #
   # Rule evaluation order (priority lowest = evaluated first):
-  #   Priority 1: header present and correct → forward to target group
-  #   Default:    everything else → 403 Forbidden
+  #   Priority 1:     header present and correct → forward to target group
+  #   Default:        everything else → 403 Forbidden
+  #
+  # On :8000 the header rule sits at priority 50000 (the maximum) instead, so
+  # host-specific preview rules added by other stacks are evaluated first.
+  # Those rules MUST also carry the X-Custom-Origin-Header condition; a rule
+  # matching on host-header alone would bypass the CloudFront-only gate.
   # ============================================================================
 
   # Port 80 — redirect to HTTPS hint; kept for health checks from AWS services
@@ -291,7 +296,8 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       ListenerArn: !Ref BackendHttpListener
-      Priority: 1
+      # Lowest precedence, so host-specific preview rules match first.
+      Priority: 50000
       Conditions:
         - Field: http-header
           HttpHeaderConfig:
@@ -358,6 +364,12 @@ Outputs:
     Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
     Export:
       Name: !Sub '${ProjectName}-${Environment}-alb-full-name'
+
+  BackendListenerArn:
+    Description: Backend (:8000) HTTPS listener ARN, for preview listener rules
+    Value: !Ref BackendHttpListener
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-backend-listener-arn'
 
   BackendTargetGroupArn:
     Description: Backend target group ARN
