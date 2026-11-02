@@ -36,6 +36,12 @@ Resources:
       ClusterSettings:
         - Name: containerInsights
           Value: enabled
+      # FARGATE_SPOT is used by the PR preview services
+      # (environment/preview/cloudformation/preview-pr.yaml). No default
+      # strategy: services that set LaunchType (backend.yaml) are unaffected.
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
       Tags:
         - Key: Project
           Value: !Ref ProjectName

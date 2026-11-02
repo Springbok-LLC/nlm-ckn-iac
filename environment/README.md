@@ -145,6 +145,35 @@ own templates (below) and `prod` is managed by NIH outside this repo.
 | ArangoDB | `arangodb/cloudformation/arangodb.yaml` | EC2 instance + EBS volume, Cloud Map service registration, S3 restore on boot. |
 | Monitoring | `monitoring/cloudformation/monitoring.yaml` | CloudWatch alarms, wedge-detection Lambdas, SNS notifications, KMS key. Optional. |
 
+### PR previews (`preview/`)
+
+Short-lived previews of labelled **nlm-ckn-ui** pull requests at
+`https://pr-<n>.dev.nlm-ckn.org`, sharing dev's ALB, cluster,
+secrets and ArangoDB (read-only `nlm_ro`). Think of previews as an
+environment before dev (PR → preview → dev → stage); there is one preview
+platform, and it is never deployed for stage.
+
+| Template | Deployed by | Provisions |
+|----------|-------------|------------|
+| `preview/cloudformation/preview-platform.yaml` | `deploy/03-deploy-preview-platform.sh` (dev only), once | `*.dev` ACM cert (also an SNI cert on dev's :8000 listener), preview S3 bucket, one wildcard CloudFront distribution reusing dev's WAF, a **CloudFront Function + KeyValueStore** for signed-cookie auth and `pr-<n>` → `pr-<n>/` prefix routing, wildcard Route 53 records, the CloudFormation service role and GitHub OIDC CI role for preview stacks, and an hourly sweeper Lambda that deletes stacks past their `ExpiresAt` tag. |
+| `preview/cloudformation/preview-pr.yaml` | nlm-ckn-ui's `preview.yml`, one stack `nlm-ckn-preview-pr-<n>` per PR | One Fargate Spot backend task (0.25 vCPU / 0.5 GB), target group, and a listener rule on dev's :8000 listener matching `pr-<n>` host + origin header. |
+
+nlm-ckn-ui never checks out this repo: the deploy script publishes
+`preview-pr.yaml` to the templates bucket and records its URL in SSM
+`/nlm-ckn/dev/preview/pr-template-url`, which the workflow passes to
+`create-change-set --template-url`. The preview CI role can only use templates
+from that `preview/` prefix, may push only to the preview ECR repo
+(`<project>-dev-preview-backend`, tags immutable, images expire after 7 days), and is
+trusted only from nlm-ckn-ui's protected `preview` GitHub environment. Previews
+need dev's :8000 catch-all rule at priority 50000 (`alb.yaml`) and the
+`FARGATE_SPOT` capacity provider on the cluster (`ecs-cluster.yaml`).
+
+Access is gated by AWS credentials rather than a shared password:
+nlm-ckn-ui's `AWS_PROFILE=springbok ./scripts/ops/preview-login.sh <n>` reads the HMAC key
+from the KeyValueStore, signs a link bound to PR `<n>` (12 h by default,
+`--hours` up to 168) and opens it; `/_preview/login` turns it into an HttpOnly
+cookie. The link itself can be shared with reviewers who have no AWS access.
+
 ### Sandbox (`sandbox/`)
 
 The NIH `sandbox` account has constraints that the shared `platform/` +
