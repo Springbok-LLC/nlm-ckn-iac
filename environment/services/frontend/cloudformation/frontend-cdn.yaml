@@ -39,6 +39,14 @@ Parameters:
       with `aws cloudfront associate-alias`, then redeploy with 'true' to attach
       the alias here and repoint DNS. See deploy/cutover-frontend-cdn.sh.
 
+  NihSandboxPrincipals:
+    Type: CommaDelimitedList
+    Description: >-
+      Root-principal ARNs of the NIH sandbox accounts. In stage only, they are
+      granted read on the frontend bucket so the built bundle can be promoted
+      cross-account. Injected by deploy/02-deploy-environment.sh from
+      NIH_SANDBOX_ACCOUNT_IDS in deploy/lib/common.sh.
+
   ApiRateLimitPer5Min:
     Type: Number
     Default: 3000
@@ -79,6 +87,7 @@ Metadata:
         Parameters:
           - ProjectName
           - Environment
+          - NihSandboxPrincipals
 
 Conditions:
   IsProd: !Equals [!Ref Environment, 'prod']
@@ -132,7 +141,7 @@ Resources:
             Condition:
               StringEquals:
                 AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
-          # Stage only: allow the sandbox account (206537881715) to read the
+          # Stage only: allow the NIH sandbox accounts to read the
           # built frontend so it can be promoted cross-account (mirrors the
           # ArangoDB dataset bucket grant in shared/shared-resources.yaml).
           - !If
@@ -140,7 +149,7 @@ Resources:
               - Sid: AllowSandboxPromotionRead
                 Effect: Allow
                 Principal:
-                  AWS: 'arn:aws:iam::206537881715:root'
+                  AWS: !Ref NihSandboxPrincipals
                 Action:
                   - s3:GetObject
                   - s3:ListBucket
