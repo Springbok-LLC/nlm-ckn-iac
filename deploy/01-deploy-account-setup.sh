@@ -130,6 +130,8 @@ aws cloudformation deploy \
   --no-fail-on-empty-changeset \
   --parameter-overrides \
     ProjectName="${PROJECT_NAME}" \
+    NihSandboxPrincipals="${NIH_SANDBOX_PRINCIPALS}" \
+    NihReadOnlyRoleArns="${NIH_READONLY_ROLE_ARNS}" \
   --region "${AWS_REGION}"
 
 echo -e "\n${GREEN}✓ Shared resources stack deployed${NC}\n"
@@ -150,6 +152,8 @@ aws cloudformation deploy \
   --no-fail-on-empty-changeset \
   --parameter-overrides \
     ProjectName="${PROJECT_NAME}" \
+    NihSandboxPrincipals="${NIH_SANDBOX_PRINCIPALS}" \
+    NihReadOnlyRoleArns="${NIH_READONLY_ROLE_ARNS}" \
   --region "${AWS_REGION}"
 
 echo -e "\n${GREEN}✓ Static assets stack deployed${NC}\n"
