@@ -195,6 +195,8 @@ Resources:
             Action:
               - s3:GetObject
               - s3:GetObjectVersion
+              - s3:GetObjectTagging
+              - s3:GetObjectVersionTagging
               - s3:ListBucket
               - s3:ListBucketVersions
               - s3:GetBucketLocation
