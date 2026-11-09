@@ -178,11 +178,15 @@ Resources:
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringLike:
-                # Allow both the fork (where CI runs) and the NIH-NLM upstream.
-                # GitHubOrg/GitHubRepo should point to the fork (Springbok-LLC/nlm-ckn-ui).
+                # Only main and the stage environment, in the fork (where CI
+                # runs; GitHubOrg/GitHubRepo) and the NIH-NLM upstream. A pull
+                # request runs its own copy of the workflow, so trusting any ref
+                # would let a PR assume this deployment role without review.
                 'token.actions.githubusercontent.com:sub':
-                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:*'
-                  - 'repo:NIH-NLM/nlm-ckn-ui:*'
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:environment:stage'
+                  - 'repo:NIH-NLM/nlm-ckn-ui:ref:refs/heads/main'
+                  - 'repo:NIH-NLM/nlm-ckn-ui:environment:stage'
               StringEquals:
                 'token.actions.githubusercontent.com:aud': sts.amazonaws.com
       Policies:
@@ -383,6 +387,59 @@ Resources:
         - Key: Repository
           Value: nlm-ckn-iac
 
+  # ============================================================================
+  # IAM Role for the nlm-ckn-ui preset sweep
+  #
+  # CI on a pull request downloads the golden dump its ETL_VERSION names and
+  # sweeps the presets against it. PRs and branches may assume this role, so it
+  # can only read the dataset bucket's name and download golden dumps.
+  # ============================================================================
+  PresetSweepRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-preset-sweep'
+      Description: Assumed by nlm-ckn-ui CI to download golden dumps for the preset sweep
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateOIDCProvider
+                - !GetAtt GitHubOIDCProvider.Arn
+                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                'token.actions.githubusercontent.com:sub':
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:pull_request'
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/*'
+      Policies:
+        - PolicyName: PresetSweepRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/shared/arangodb-bucket-name'
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ProjectName}-arangodb-data-${AWS::AccountId}/runs/*/06-golden-dump.tar.gz'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: nlm-ckn-ui preset sweep - read-only
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Owner
+          Value: springbok
+        - Key: Repository
+          Value: nlm-ckn-iac
+
 Outputs:
   TemplatesBucketName:
     Description: S3 bucket for CloudFormation templates
@@ -415,6 +472,10 @@ Outputs:
   GitHubActionsRoleName:
     Description: IAM Role name for GitHub Actions
     Value: !Ref GitHubActionsRole
+
+  PresetSweepRoleArn:
+    Description: IAM Role ARN for the nlm-ckn-ui preset sweep
+    Value: !GetAtt PresetSweepRole.Arn
 
   DeploymentInstructions:
     Description: Next steps for deployment
