@@ -1,0 +1,16 @@
+[
+  { "ParameterKey": "ProjectName",           "ParameterValue": "nlm-ckn" },
+  { "ParameterKey": "Environment",           "ParameterValue": "prod" },
+  { "ParameterKey": "SubnetId",              "ParameterValue": "subnet-REPLACE" },
+  { "ParameterKey": "AvailabilityZone",      "ParameterValue": "us-east-1a" },
+  { "ParameterKey": "SecurityGroupId",       "ParameterValue": "sg-REPLACE" },
+  { "ParameterKey": "CloudMapNamespaceId",   "ParameterValue": "ns-REPLACE" },
+  { "ParameterKey": "ArangoDbTargetGroupArn","ParameterValue": "" },
+  { "ParameterKey": "Architecture",          "ParameterValue": "arm64" },
+  { "ParameterKey": "InstanceType",          "ParameterValue": "m7g.xlarge" },
+  { "ParameterKey": "InstanceProfileArn",    "ParameterValue": "" },
+  { "ParameterKey": "ArangoImage",           "ParameterValue": "arangodb:3.12" },
+  { "ParameterKey": "CreatePasswordSecrets", "ParameterValue": "true" },
+  { "ParameterKey": "DatasetBucketName",     "ParameterValue": "REPLACE-arangodb-data" },
+  { "ParameterKey": "DatasetVersion",        "ParameterValue": "runs/vX.Y.Z/06-golden-dump.tar.gz" }
+]

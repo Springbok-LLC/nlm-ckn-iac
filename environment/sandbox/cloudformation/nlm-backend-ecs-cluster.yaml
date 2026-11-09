@@ -25,9 +25,16 @@ Parameters:
   #   Type: AWS::EC2::Image::Id
   #   Description: AMI ID to use for ECS container instances (must support ECS agent)
 
+  # x86_64 only: the launch template's ECS-optimized AMI is x86_64, so
+  # Graviton (t4g/m7g/...) types would fail to boot it.
   pInstanceType:
     Type: String
     Default: t3.medium
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
 
   pDesiredCapacity:
     Type: Number
@@ -97,12 +104,11 @@ Resources:
         Timeout: PT30M
     Properties:
       LaunchTemplateData:
-        ImageId: ami-0e8aa56cf88aaa3b3
-          #Fn::Join:
-            #- ""
-            #- - '{{resolve:ssm:'
-              #- 'arn:aws:ssm:us-east-1:300197248493:parameter/standard/imagebuilder/ecs'
-              #- '}}'
+        # Previously hardcoded ami-0e8aa56cf88aaa3b3, which AWS has since
+        # deregistered. Resolved at deploy time via SSM instead (AL2023
+        # ECS-optimized x86_64, matching pInstanceType's default t3.medium and
+        # the AL2023-only IMDSv2 token flow in UserData below).
+        ImageId: '{{resolve:ssm:/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id}}'
         InstanceType: !Ref pInstanceType
         IamInstanceProfile:  #Fn::ImportValue: !Sub ${pAwsAccount}-Bastion-InstanceProfile
           Name: "cell-kn-sandbox-arangodb-ec2"

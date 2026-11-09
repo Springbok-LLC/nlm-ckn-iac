@@ -130,7 +130,7 @@ Parameters:
 
   FluentBitImage:
     Type: String
-    Default: public.ecr.aws/aws-observability/aws-for-fluent-bit:2.34.3.20260722
+    Default: public.ecr.aws/aws-observability/aws-for-fluent-bit:2.34.3.20260918
     Description: >
       Container image for the host log-router daemon (AWS for Fluent Bit). Run on
       each compute instance via the launch template to reassemble multi-line

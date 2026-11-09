@@ -1,6 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: 'ArangoDB on EC2 with EBS persistence and S3 restore capability'
 
+# The bootstrap script below is mirrored in manual/arangodb-ec2/cloudformation/arangodb-ec2.yaml
+# (standalone NIH handoff copy). Apply bootstrap changes to both.
+
 Parameters:
   ProjectName:
     Type: String
