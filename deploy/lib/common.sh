@@ -32,7 +32,7 @@
 #                            account allowing the S3 reads.
 # ──────────────────────────────────────────────────────────────────────────────
 : "${NIH_SANDBOX_ACCOUNT_IDS:=206537881715}"
-: "${NIH_READONLY_ROLE_ARNS:=arn:aws:iam::758297805533:role/nlm_aws_devops}"
+: "${NIH_READONLY_ROLE_ARNS:=arn:aws:iam::758297805533:role/nlm_aws_devops,arn:aws:iam::491634416615:role/nlm_aws_devops,arn:aws:iam::070163433501:role/nlm_aws_devops}"
 
 # Root-principal ARNs for NIH_SANDBOX_ACCOUNT_IDS, comma-separated — the form
 # the templates' NihSandboxPrincipals parameter takes.

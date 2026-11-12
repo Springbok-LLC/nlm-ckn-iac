@@ -119,6 +119,10 @@ Metadata:
           - NihSandboxPrincipals
           - NihReadOnlyRoleArns
 
+# ── Conditions ────────────────────────────────────────────────────────────────
+Conditions:
+  HasSandboxPrincipals: !Not [!Equals [!Join ['', !Ref NihSandboxPrincipals], '']]
+
 # ── Resources ─────────────────────────────────────────────────────────────────
 Resources:
 
@@ -203,20 +207,24 @@ Resources:
             Resource:
               - !GetAtt StaticAssetsBucket.Arn
               - !Sub '${StaticAssetsBucket.Arn}/*'
-          - Sid: AllowCrossAccountRead
-            Effect: Allow
-            Principal:
-              AWS: !Ref NihSandboxPrincipals
-            Action:
-              - s3:GetObject
-              - s3:ListBucket
-              - s3:GetBucketLocation
-            Resource:
-              # Bucket ARN for ListBucket/GetBucketLocation; object reads are
-              # confined to the published asset prefix, which is all a reader
-              # needs to copy releases into its own environments.
-              - !GetAtt StaticAssetsBucket.Arn
-              - !Sub '${StaticAssetsBucket.Arn}/${AssetPrefix}/*'
+          # Omitted when NIH_SANDBOX_ACCOUNT_IDS is empty (no sandbox access).
+          - !If
+            - HasSandboxPrincipals
+            - Sid: AllowCrossAccountRead
+              Effect: Allow
+              Principal:
+                AWS: !Ref NihSandboxPrincipals
+              Action:
+                - s3:GetObject
+                - s3:ListBucket
+                - s3:GetBucketLocation
+              Resource:
+                # Bucket ARN for ListBucket/GetBucketLocation; object reads are
+                # confined to the published asset prefix, which is all a reader
+                # needs to copy releases into its own environments.
+                - !GetAtt StaticAssetsBucket.Arn
+                - !Sub '${StaticAssetsBucket.Arn}/${AssetPrefix}/*'
+            - !Ref AWS::NoValue
 
   # Published so consumers (nlm-ckn-ui's deploy-dataset.sh, nlm-ckn-etl's
   # manifest step) resolve the bucket by SSM lookup instead of reconstructing

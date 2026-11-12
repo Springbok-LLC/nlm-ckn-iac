@@ -41,10 +41,9 @@
 #   KVS_ARN=$(aws cloudformation describe-stacks --region us-east-1 \
 #     --stack-name nlm-ckn-dev-preview-platform \
 #     --query "Stacks[0].Outputs[?OutputKey=='PreviewAuthStoreArn'].OutputValue" --output text)
-#   ETAG=$(aws cloudfront-keyvaluestore describe-key-value-store --region us-east-1 \
+#   ETAG=$(aws cloudfront-keyvaluestore describe-key-value-store \
 #     --kvs-arn "$KVS_ARN" --query ETag --output text)
-#   aws cloudfront-keyvaluestore put-key --region us-east-1 \
-#     --kvs-arn "$KVS_ARN" --if-match "$ETAG" \
+#   aws cloudfront-keyvaluestore put-key --kvs-arn "$KVS_ARN" --if-match "$ETAG" \
 #     --key session-key --value "$(openssl rand -hex 32)"
 #
 # Dev's ECS cluster must have the FARGATE_SPOT capacity provider
