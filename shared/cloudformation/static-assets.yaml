@@ -29,7 +29,9 @@ Description: >
 #     --template-file shared/cloudformation/static-assets.yaml \
 #     --stack-name nlm-ckn-static-assets \
 #     --capabilities CAPABILITY_NAMED_IAM \
-#     --parameter-overrides ProjectName=nlm-ckn
+#     --parameter-overrides ProjectName=nlm-ckn \
+#       NihSandboxPrincipals=<from deploy/lib/common.sh> \
+#       NihReadOnlyRoleArns=<from deploy/lib/common.sh>
 #
 # After deploying, copy the AssetPushRoleArn output into the nlm-ckn repo's
 # AWS_ASSET_PUSH_ROLE_ARN Actions secret:
@@ -81,15 +83,21 @@ Parameters:
       release, which fires at refs/tags/<tag>; refs/heads/main is allowed so the
       workflow can also be run manually. Update these if the workflow is renamed.
 
-  CrossAccountReaderAccountId:
-    Type: String
-    Default: '206537881715'
-    AllowedPattern: '^([0-9]{12})?$'
+  NihSandboxPrincipals:
+    Type: CommaDelimitedList
     Description: >
-      AWS account granted read-only access to the assets, so it can copy them
-      into its own environments (the NIH sandbox account, mirroring the grant on
-      the ArangoDB dataset bucket in shared-resources.yaml). Set to an empty
-      string to grant no cross-account access.
+      Root-principal ARNs of the NIH sandbox accounts that promote from this
+      one, granted
+      read-only access to the published asset prefix. Injected by the deploy scripts from NIH_SANDBOX_ACCOUNT_IDS in
+      deploy/lib/common.sh.
+
+  NihReadOnlyRoleArns:
+    Type: CommaDelimitedList
+    Description: >
+      ARNs of NIH roles (NLM DevOps) granted read-only access to the whole
+      static assets bucket.
+      Injected by the deploy scripts from NIH_READONLY_ROLE_ARNS in
+      deploy/lib/common.sh.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -108,11 +116,12 @@ Metadata:
       - Label:
           default: Cross-Account Access
         Parameters:
-          - CrossAccountReaderAccountId
+          - NihSandboxPrincipals
+          - NihReadOnlyRoleArns
 
 # ── Conditions ────────────────────────────────────────────────────────────────
 Conditions:
-  HasCrossAccountReader: !Not [!Equals [!Ref CrossAccountReaderAccountId, '']]
+  HasSandboxPrincipals: !Not [!Equals [!Join ['', !Ref NihSandboxPrincipals], '']]
 
 # ── Resources ─────────────────────────────────────────────────────────────────
 Resources:
@@ -173,30 +182,49 @@ Resources:
         - Key: Repository
           Value: nlm-ckn-iac
 
-  # Read-only cross-account grant, so an account we don't manage (the NIH
-  # sandbox) can pull the assets into its own environments.
+  # Read-only grants (lists in deploy/lib/common.sh): the NIH DevOps roles get
+  # the whole bucket; the NIH sandbox accounts get the published asset prefix so
+  # they can pull the assets into their own environments.
   StaticAssetsBucketPolicy:
     Type: AWS::S3::BucketPolicy
-    Condition: HasCrossAccountReader
     Properties:
       Bucket: !Ref StaticAssetsBucket
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: AllowCrossAccountRead
+          - Sid: AllowReadOnlyRole
             Effect: Allow
             Principal:
-              AWS: !Sub 'arn:${AWS::Partition}:iam::${CrossAccountReaderAccountId}:root'
+              AWS: !Ref NihReadOnlyRoleArns
             Action:
               - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetObjectTagging
+              - s3:GetObjectVersionTagging
               - s3:ListBucket
+              - s3:ListBucketVersions
               - s3:GetBucketLocation
             Resource:
-              # Bucket ARN for ListBucket/GetBucketLocation; object reads are
-              # confined to the published asset prefix, which is all a reader
-              # needs to copy releases into its own environments.
               - !GetAtt StaticAssetsBucket.Arn
-              - !Sub '${StaticAssetsBucket.Arn}/${AssetPrefix}/*'
+              - !Sub '${StaticAssetsBucket.Arn}/*'
+          # Omitted when NIH_SANDBOX_ACCOUNT_IDS is empty (no sandbox access).
+          - !If
+            - HasSandboxPrincipals
+            - Sid: AllowCrossAccountRead
+              Effect: Allow
+              Principal:
+                AWS: !Ref NihSandboxPrincipals
+              Action:
+                - s3:GetObject
+                - s3:ListBucket
+                - s3:GetBucketLocation
+              Resource:
+                # Bucket ARN for ListBucket/GetBucketLocation; object reads are
+                # confined to the published asset prefix, which is all a reader
+                # needs to copy releases into its own environments.
+                - !GetAtt StaticAssetsBucket.Arn
+                - !Sub '${StaticAssetsBucket.Arn}/${AssetPrefix}/*'
+            - !Ref AWS::NoValue
 
   # Published so consumers (nlm-ckn-ui's deploy-dataset.sh, nlm-ckn-etl's
   # manifest step) resolve the bucket by SSM lookup instead of reconstructing

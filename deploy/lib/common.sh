@@ -15,6 +15,38 @@
 : "${PROJECT_NAME:=nlm-ckn}"
 
 # ──────────────────────────────────────────────────────────────────────────────
+# NIH access lists — the single source of truth for which NIH accounts and roles
+# are granted access to resources in this account. Comma-separated; override by
+# exporting before invoking a deploy script. Each template that grants NIH
+# access takes these as required parameters (no template default).
+#
+#   NIH_SANDBOX_ACCOUNT_IDS  Accounts that promote from this one. Each account's
+#                            root principal gets: pull on the backend ECR repo,
+#                            read/write on the ArangoDB dataset bucket, read on
+#                            the published plot assets, and read on the stage
+#                            frontend bucket.
+#   NIH_READONLY_ROLE_ARNS   Roles (NLM DevOps) granted read-only access to the
+#                            ArangoDB dataset and static assets buckets. Add the
+#                            role's ARN in each account it is created in. Each
+#                            role also needs an identity policy in its own
+#                            account allowing the S3 reads.
+# ──────────────────────────────────────────────────────────────────────────────
+: "${NIH_SANDBOX_ACCOUNT_IDS:=206537881715}"
+: "${NIH_READONLY_ROLE_ARNS:=arn:aws:iam::758297805533:role/nlm_aws_devops,arn:aws:iam::491634416615:role/nlm_aws_devops,arn:aws:iam::070163433501:role/nlm_aws_devops}"
+
+# Root-principal ARNs for NIH_SANDBOX_ACCOUNT_IDS, comma-separated — the form
+# the templates' NihSandboxPrincipals parameter takes.
+NIH_SANDBOX_PRINCIPALS=$(
+  IFS=',' read -ra _ids <<< "${NIH_SANDBOX_ACCOUNT_IDS}"
+  _arns=()
+  for _id in "${_ids[@]}"; do
+    _id="${_id//[[:space:]]/}"
+    [[ -n "${_id}" ]] && _arns+=("arn:aws:iam::${_id}:root")
+  done
+  IFS=','; echo "${_arns[*]}"
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
 # ecr_image_exists REPO_NAME TAG REGION   → 0 if the tagged image exists, else 1
 # ──────────────────────────────────────────────────────────────────────────────
 ecr_image_exists() {

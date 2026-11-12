@@ -804,7 +804,8 @@ if [ "$DEPLOY_MODE" = "--cdn-only" ] || { [ "$DEPLOY_CDN" = true ] && [ "$DEPLOY
   CDN_PARAMS_FILE=$(make_params_file \
     ProjectName "$PROJECT_NAME" \
     Environment "$ENVIRONMENT" \
-    AttachAlias "$ATTACH_ALIAS")
+    AttachAlias "$ATTACH_ALIAS" \
+    NihSandboxPrincipals "$NIH_SANDBOX_PRINCIPALS")
 
   CDN_RESULT=0
   deploy_stack \
