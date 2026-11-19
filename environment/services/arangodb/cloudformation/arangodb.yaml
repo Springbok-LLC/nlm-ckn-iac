@@ -805,7 +805,7 @@ Resources:
                   # $1 = file, $2 = API ("analyzer" or "gharial"), $3 = database.
                   import_sidecar() {
                     local FILE="$1" API="$2" DB="$3"
-                    local JQ_FILTER NORM OBJ STATUS
+                    local JQ_FILTER NORM RESP OBJ STATUS ERRNUM
                     [ -f "$FILE" ] || return 0
                     echo "  [$DB] importing $API objects from $FILE"
 
@@ -826,21 +826,37 @@ Resources:
                       sidecar_import_failed "could not parse sidecar file $FILE"
                     fi
 
+                    RESP="/tmp/ckn-sidecar-$DB-$API.resp"
                     while IFS= read -r OBJ; do
                       [ -z "$OBJ" ] && continue
-                      STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                      # Guarded so a transport failure (connection refused,
+                      # timeout) reports via cfn-signal instead of set -e
+                      # silently killing the script.
+                      if ! STATUS=$(curl -s -o "$RESP" -w '%{http_code}' -X POST \
                         -H "$ARANGO_AUTH_HEADER" \
                         -H 'Content-Type: application/json' \
                         -d "$OBJ" \
-                        "http://localhost:8529/_db/$DB/_api/$API")
-                      # 2xx = created, 409 = already exists (idempotent re-run);
-                      # any other status is fatal.
+                        "http://localhost:8529/_db/$DB/_api/$API"); then
+                        sidecar_import_failed "$DB $API import request failed (curl transport error, HTTP $STATUS) from $FILE"
+                      fi
+                      # 2xx = created (or identical analyzer already present).
+                      # 409 is accepted ONLY for errorNum 1925 (graph already
+                      # exists -- idempotent re-run). Other 409s, e.g. an edge
+                      # collection already used with different from/to vertex
+                      # collections in another graph, are fatal like any other
+                      # status.
                       case "$STATUS" in
-                        20[0-9]|409) ;;
-                        *) sidecar_import_failed "$DB $API import returned HTTP $STATUS from $FILE" ;;
+                        20[0-9]) ;;
+                        409)
+                          ERRNUM=$(jq -r '.errorNum // empty' "$RESP" 2>/dev/null || true)
+                          if [ "$ERRNUM" != "1925" ]; then
+                            sidecar_import_failed "$DB $API import returned HTTP 409 (errorNum '$ERRNUM', not a duplicate graph) from $FILE: $(head -c 500 "$RESP")"
+                          fi
+                          ;;
+                        *) sidecar_import_failed "$DB $API import returned HTTP $STATUS from $FILE: $(head -c 500 "$RESP" 2>/dev/null || true)" ;;
                       esac
                     done < "$NORM"
-                    rm -f "$NORM"
+                    rm -f "$NORM" "$RESP"
                   }
 
                   echo "==> Importing named graphs and custom analyzers"
