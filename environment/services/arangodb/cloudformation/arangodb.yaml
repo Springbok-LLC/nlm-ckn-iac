@@ -487,7 +487,7 @@ Resources:
 
                 # ── 1. System setup
                 yum update -y
-                yum install -y docker aws-cli
+                yum install -y docker aws-cli jq
 
                 # CloudWatch agent
                 yum install -y amazon-cloudwatch-agent
@@ -765,6 +765,99 @@ Resources:
                     --input-directory /dump \
                     $RESTORE_FLAGS
                   set -x
+
+                  # ── 4a. Import named graphs and custom analyzers (sidecar files)
+                  # arangorestore does NOT restore named graphs or custom
+                  # analyzers -- they live in the _graphs / _analyzers system
+                  # collections, which the restore above deliberately skips
+                  # (--include-system-collections false). Without this step an
+                  # instance replacement (resize, AMI roll, volume loss) comes
+                  # back with every collection populated but no KN-Ontologies-v2.0
+                  # / KN-Phenotypes-v2.0 named graphs and no norm-lower /
+                  # wildcard-lower / n-gram / text_en_no_stem analyzers, so the
+                  # backend's graph traversals and its 'indexed' arangosearch
+                  # view fail until someone re-runs nlm-ckn-ui's
+                  # scripts/app/deploy-dataset.sh --force by hand.
+                  #
+                  # Mirrors _import_graphs_and_analyzers() in that script. Both
+                  # sidecar files are optional: a dump produced before ETL
+                  # started exporting them is a silent no-op, so older datasets
+                  # still boot.
+                  #
+                  # Override when the schema changes rather than editing the
+                  # default (matches EXPECTED_DBS in deploy-dataset.sh).
+                  SIDECAR_DBS="Cell-KN-Ontologies Cell-KN-Phenotypes"
+
+                  # A missing graph or analyzer leaves the instance unusable, so
+                  # fail the whole bootstrap rather than stamping the version
+                  # marker -- a stamped marker would make the NEXT boot skip the
+                  # restore entirely and leave the gap in place permanently.
+                  sidecar_import_failed() {
+                    echo "ERROR: $1"
+                    /opt/aws/bin/cfn-signal -e 1 \
+                      --stack "${AWS::StackName}" \
+                      --resource ArangoDbInstance \
+                      --region "${AWS::Region}"
+                    exit 1
+                  }
+
+                  # POST every object in a sidecar file to an ArangoDB endpoint.
+                  # $1 = file, $2 = API ("analyzer" or "gharial"), $3 = database.
+                  import_sidecar() {
+                    local FILE="$1" API="$2" DB="$3"
+                    local JQ_FILTER NORM OBJ STATUS
+                    [ -f "$FILE" ] || return 0
+                    echo "  [$DB] importing $API objects from $FILE"
+
+                    # Normalize to one compact JSON object per line so true
+                    # NDJSON, a single top-level JSON array and a stream of
+                    # pretty-printed objects are all accepted.
+                    JQ_FILTER='if type=="array" then .[] else . end'
+                    if [ "$API" = "analyzer" ]; then
+                      # Strip the "<db>::" prefix from .name -- ArangoDB re-adds
+                      # it, and leaving it in yields a double-prefixed analyzer.
+                      # Done in jq, not shell parameter expansion, to keep brace
+                      # syntax out of this Fn::Sub block.
+                      JQ_FILTER="$JQ_FILTER"' | .name = (.name | split("::") | last)'
+                    fi
+
+                    NORM="/tmp/ckn-sidecar-$DB-$API.ndjson"
+                    if ! jq -c "$JQ_FILTER" "$FILE" > "$NORM"; then
+                      sidecar_import_failed "could not parse sidecar file $FILE"
+                    fi
+
+                    while IFS= read -r OBJ; do
+                      [ -z "$OBJ" ] && continue
+                      STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                        -H "$ARANGO_AUTH_HEADER" \
+                        -H 'Content-Type: application/json' \
+                        -d "$OBJ" \
+                        "http://localhost:8529/_db/$DB/_api/$API")
+                      # 2xx = created, 409 = already exists (idempotent re-run);
+                      # any other status is fatal.
+                      case "$STATUS" in
+                        20[0-9]|409) ;;
+                        *) sidecar_import_failed "$DB $API import returned HTTP $STATUS from $FILE" ;;
+                      esac
+                    done < "$NORM"
+                    rm -f "$NORM"
+                  }
+
+                  echo "==> Importing named graphs and custom analyzers"
+                  # Tracing off for the whole block: the basic-auth header is
+                  # derived from the root password and UserData output goes to
+                  # CloudWatch. The header is passed to curl via a variable so
+                  # the password never appears in a process argument list.
+                  set +x
+                  ARANGO_AUTH_HEADER="Authorization: Basic $(printf 'root:%s' "$ARANGO_ROOT_PASSWORD" | base64 | tr -d '\n')"
+                  # shellcheck disable=SC2086  # word-split on the DB list is intentional
+                  for SIDECAR_DB in $SIDECAR_DBS; do
+                    import_sidecar "$DUMP_DIR/$SIDECAR_DB/ckn-analyzers.ndjson" analyzer "$SIDECAR_DB"
+                    import_sidecar "$DUMP_DIR/$SIDECAR_DB/ckn-graphs.ndjson" gharial "$SIDECAR_DB"
+                  done
+                  unset ARANGO_AUTH_HEADER SIDECAR_DB
+                  set -x
+                  echo "==> Named graph and analyzer import complete"
 
                   echo "$CURRENT_VERSION" > "$DATA_DIR/.dataset-version"
                   rm -rf "$DUMP_EXTRACT_DIR"
